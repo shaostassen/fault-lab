@@ -13,17 +13,20 @@ firmware/
   crypto/       sha256.c -- stands in for Ed25519 on runtime budget
   secureboot/   image format, verify.c (baseline) + verify_hardened.c
   supervisor/   motor safety state machine, baseline + hardened
-  Makefile      builds the {base,hardened} x {-O0,-O2,-Os} matrix
+  Makefile      builds {base,hardened} x {-O0,-O2,-Os} x {cm3,rv32}
 harness/
   faultlab/
     target.py                  ELF load, pinned symbols, test vectors
     faults.py                  Fault/FaultSet descriptors, campaign generation
+    backend/isa.py             per-architecture constants -- the only place
+                                cm3 and rv32 differ
     backend/unicorn_backend.py emulation, snapshot ladder, fault application
                                 (golden trace capture lives here, in .trace())
+    backend/gdb_rsp.py         GDB remote-serial-protocol client (QEMU backend)
     classify.py                outcome classification
     campaign.py                spawn pool, work distribution
-    slice.py                   backward taint slice -- multi-fault candidate
-                                narrowing (see CLAUDE.md Open work item 2)
+    slice.py                   backward taint slice -- multi-fault narrowing
+    ga.py                      genetic multi-fault search
     store.py                   parquet writer
     cli.py                     sweep / matrix entry points
   tests/
@@ -109,27 +112,37 @@ Getting there required finding that the first version of the countermeasures'
 residual bypasses were at the unprotected CALL SITE, not in the verifier --
 aggregate counts would have missed it entirely.
 
-Five silent harness bugs were found and fixed along the way -- inflated
+Six silent harness bugs were found and fixed along the way -- inflated
 results, suppressed results, nondeterminism, an undefined-register artifact,
-and (the big one) a telemetry field that could be corrupted into looking like
-a real bypass, which briefly produced a fabricated "hardened `-O0` is the
-worst configuration" conclusion before being caught and retracted. All five
-are documented in RESULTS.md because the failure modes generalise past this
-project -- bug 5 especially, since it's the same root cause as bug 1
-recurring in a field bug 1's own fix didn't cover.
+a telemetry field that could be corrupted into looking like a real bypass
+(which briefly produced a fabricated "hardened `-O0` is the worst
+configuration" conclusion before being caught and retracted), and the same
+bug again in the supervisor classifier, found by audit rather than assumed
+from the first fix. All six are documented in RESULTS.md because the failure
+modes generalise past this project -- bugs 5 and 6 especially, being one root
+cause recurring in a field the earlier fix didn't cover.
 
 Determinism is gated: `python3 harness/tests/test_determinism.py`.
 
+**Two architectures.** The same firmware, vectors, fault model and memory map
+build and run for Cortex-M3 and RV32I (`make matrix-rv32`). The
+architecture-independence claim is now a measurement: hardening closes the
+rollback and bad-magic vectors to zero on both, and hardened `-O0` is 0/0/0 on
+both. It is also not the whole story -- hardening measures 3x *weaker* on
+RV32I against the forged vector. See RESULTS.md.
+
 Backward taint slicing (`harness/faultlab/slice.py`), double-fault campaigns
-against hardened `-O2` (full 95.9M-pair search, not just a seeded sample --
-see RESULTS.md), a GA multi-fault search (`harness/faultlab/ga.py`), and the
-supervisor watchdog model are all built -- the last of these found that an
-independent watchdog closes only about half of the safety-oracle gap (the
-half where the CPU actually stops; the other half is a clean halt with wrong
-state, which no liveness watchdog can ever catch). See CLAUDE.md's Open work
-list for current numbers and what's next -- as of this writing, that's the
-QEMU backend and MicroBlaze port (in that order -- Unicorn has no MicroBlaze
-support, so QEMU is the real prerequisite).
+against hardened `-O2` (full 95.9M-pair search, not just a seeded sample), a
+GA multi-fault search (`harness/faultlab/ga.py`), and the supervisor watchdog
+model are all built -- the last found that an independent watchdog closes only
+about half of the safety-oracle gap (the half where the CPU actually stops;
+the other half is a clean halt with wrong state, which no liveness watchdog
+can ever catch).
+
+Next: match GCC generations across the two architectures (the RV32 column used
+14.2.0 against ARM's 15.3.1, and this project already knows compiler version
+moves baseline counts), then the QEMU backend and the MicroBlaze port --
+Unicorn has no MicroBlaze target, so QEMU is the real prerequisite there.
 
 ## Quickstart
 

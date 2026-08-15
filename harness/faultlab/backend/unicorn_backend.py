@@ -32,12 +32,11 @@ from enum import IntEnum
 
 import capstone
 from unicorn import (
-    Uc, UC_ARCH_ARM, UC_MODE_THUMB, UC_MODE_MCLASS,
-    UC_HOOK_CODE, UC_HOOK_MEM_WRITE, UC_PROT_ALL,
+    Uc, UC_HOOK_CODE, UC_HOOK_MEM_WRITE, UC_PROT_ALL,
     UC_PROT_READ, UC_PROT_EXEC, UC_PROT_WRITE, UcError,
 )
-from unicorn.arm_const import UC_ARM_REG_PC, UC_ARM_REG_SP, UC_ARM_REG_R0, UC_ARM_REG_LR
 
+from .isa import CM3
 from ..faults import FaultModel, FaultSet
 from ..target import (
     Target, OracleState, FLASH_BASE, FLASH_SIZE, RAM_BASE, RAM_SIZE,
@@ -77,7 +76,10 @@ class UnicornBackend:
 
     def __init__(self, target: Target) -> None:
         self.target = target
-        self.uc = Uc(UC_ARCH_ARM, UC_MODE_THUMB | UC_MODE_MCLASS)
+        # Targets built before the ISA axis existed have no descriptor; they are
+        # all Cortex-M by construction.
+        self.isa = getattr(target, "isa", None) or CM3
+        self.uc = Uc(self.isa.uc_arch, self.isa.uc_mode)
         # FLASH IS READ+EXEC, NEVER WRITE. Two reasons, one correctness and
         # one fidelity:
         #
@@ -100,7 +102,7 @@ class UnicornBackend:
         self.uc.mem_map(ORACLE_BASE, ORACLE_WINDOW, UC_PROT_ALL)
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._on_mmio,
                          begin=ORACLE_BASE, end=ORACLE_BASE + ORACLE_WINDOW)
-        self._md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
+        self._md = capstone.Cs(self.isa.cs_arch, self.isa.cs_mode)
         self._oracle_addr = target.sym("g_oracle")
         self._halted = False
         self._marks = []
@@ -135,10 +137,8 @@ class UnicornBackend:
                           struct.pack(ORACLE_STATE_FMT, ORACLE_MAGIC, 0, 0, 0, 0, 0, 0, 0))
         for addr, data in writes:
             self.uc.mem_write(addr, data)
-        self.uc.reg_write(UC_ARM_REG_SP, self.target.initial_sp)
-        self.uc.reg_write(UC_ARM_REG_PC, self.target.entry | 1)
-        # R0-R12 and LR are DEFINED zero, not left whatever they were. Real
-        # Cortex-M3 silicon leaves these architecturally undefined on reset,
+        # General-purpose registers are DEFINED zero, not left whatever they
+        # were. Real silicon leaves these architecturally undefined on reset,
         # but "undefined" must mean one deliberate, documented value here, not
         # an accident of call order. _init_worker() calls trace() (a full,
         # unfaulted golden run) before build_ladder() snapshots rung 0 -- if
@@ -150,9 +150,15 @@ class UnicornBackend:
         # .data copy loop behaved, producing a SEC_BYPASS that a second,
         # independent run with genuinely undefined (zeroed) registers does
         # not reproduce.
-        for r in range(UC_ARM_REG_R0, UC_ARM_REG_R0 + 13):  # R0..R12
+        #
+        # This runs BEFORE SP is set, not after: on RISC-V the stack pointer is
+        # x2, which is inside the general-purpose range being cleared here, so
+        # the reverse order would zero the SP that was just established. On
+        # Cortex-M the two sets are disjoint and the order is immaterial.
+        for r in self.isa.reset_zero_regs:
             self.uc.reg_write(r, 0)
-        self.uc.reg_write(UC_ARM_REG_LR, 0)
+        self.uc.reg_write(self.isa.reg_sp, self.target.initial_sp)
+        self.uc.reg_write(self.isa.reg_pc, self.target.entry | self.isa.pc_mode_bit)
         self._halted = False
         self._marks = []
         self._instr = 0
@@ -178,8 +184,8 @@ class UnicornBackend:
             return False
         if count <= 0:
             return True
-        pc = self.uc.reg_read(UC_ARM_REG_PC)
-        self.uc.emu_start(pc | 1, 0xFFFFFFF0, timeout=0, count=count)
+        pc = self.uc.reg_read(self.isa.reg_pc)
+        self.uc.emu_start(pc | self.isa.pc_mode_bit, 0xFFFFFFF0, timeout=0, count=count)
         if self._halted:
             return False
         self._instr += count
@@ -190,7 +196,17 @@ class UnicornBackend:
 
         Thumb-2 is variable width (2 or 4 bytes), so a naive pc += 2*k produces
         misaligned garbage and inflates the CRASH count -- which would look like
-        a result and would be wrong. Decode properly."""
+        a result and would be wrong. Decode properly.
+
+        On a fixed-width ISA the decode is not just unnecessary but actively
+        undesirable: capstone stops disassembling at the first byte pattern it
+        does not recognise, so on a target where every instruction is the same
+        width, a skip landing on data or on an unimplemented encoding would
+        silently return a short width and move the PC somewhere arbitrary.
+        Multiplying is both faster and more honest about what the fault model
+        says happens."""
+        if self.isa.fixed_insn_bytes is not None:
+            return self.isa.fixed_insn_bytes * k
         code = bytes(self.uc.mem_read(pc, 4 * k + 8))
         total = 0
         for i, insn in enumerate(self._md.disasm(code, pc)):
@@ -202,18 +218,18 @@ class UnicornBackend:
     def _apply(self, f) -> None:
         uc = self.uc
         if f.model == FaultModel.SKIP:
-            pc = uc.reg_read(UC_ARM_REG_PC)
-            uc.reg_write(UC_ARM_REG_PC, (pc + self._skip_bytes(pc, f.value)) | 1)
+            pc = uc.reg_read(self.isa.reg_pc)
+            uc.reg_write(self.isa.reg_pc, (pc + self._skip_bytes(pc, f.value)) | self.isa.pc_mode_bit)
         elif f.model == FaultModel.REG_XOR:
-            r = UC_ARM_REG_R0 + f.target
+            r = self.isa.fault_reg_base + f.target
             uc.reg_write(r, (uc.reg_read(r) ^ f.value) & 0xFFFFFFFF)
         elif f.model == FaultModel.REG_SET:
-            uc.reg_write(UC_ARM_REG_R0 + f.target, f.value & 0xFFFFFFFF)
+            uc.reg_write(self.isa.fault_reg_base + f.target, f.value & 0xFFFFFFFF)
         elif f.model == FaultModel.MEM_XOR:
             cur = int.from_bytes(uc.mem_read(f.target, f.width), "little")
             uc.mem_write(f.target, (cur ^ f.value).to_bytes(f.width, "little"))
         elif f.model == FaultModel.OPCODE_XOR:
-            pc = uc.reg_read(UC_ARM_REG_PC)
+            pc = uc.reg_read(self.isa.reg_pc)
             cur = int.from_bytes(uc.mem_read(pc, 2), "little")
             uc.mem_write(pc, ((cur ^ f.value) & 0xFFFF).to_bytes(2, "little"))
 
@@ -229,17 +245,17 @@ class UnicornBackend:
             if not self._halted:
                 remaining = budget - self._instr
                 if remaining > 0:
-                    self.uc.emu_start(self.uc.reg_read(UC_ARM_REG_PC) | 1,
+                    self.uc.emu_start(self.uc.reg_read(self.isa.reg_pc) | self.isa.pc_mode_bit,
                                       0xFFFFFFF0, timeout=0, count=remaining)
                     if not self._halted:
                         self._instr = budget
         except UcError as e:
             return RunResult(HaltReason.CPUFAULT, self._instr, self._read_oracle(),
-                             list(self._marks), self.uc.reg_read(UC_ARM_REG_PC), str(e))
+                             list(self._marks), self.uc.reg_read(self.isa.reg_pc), str(e))
         return RunResult(
             HaltReason.ORACLE if self._halted else HaltReason.BUDGET,
             self._instr, self._read_oracle(), list(self._marks),
-            self.uc.reg_read(UC_ARM_REG_PC))
+            self.uc.reg_read(self.isa.reg_pc))
 
     # --- golden trace (the ONLY place a code hook is used) -----------------
 
@@ -252,7 +268,7 @@ class UnicornBackend:
         h = self.uc.hook_add(UC_HOOK_CODE, lambda u, a, s, d: seq.append(a))
         err = None
         try:
-            self.uc.emu_start(self.uc.reg_read(UC_ARM_REG_PC) | 1,
+            self.uc.emu_start(self.uc.reg_read(self.isa.reg_pc) | self.isa.pc_mode_bit,
                               0xFFFFFFF0, timeout=0, count=budget)
             reason = HaltReason.ORACLE if self._halted else HaltReason.BUDGET
         except UcError as e:
@@ -261,7 +277,7 @@ class UnicornBackend:
             self.uc.hook_del(h)
         self._instr = len(seq)
         return (RunResult(reason, len(seq), self._read_oracle(), list(self._marks),
-                          self.uc.reg_read(UC_ARM_REG_PC), err), seq)
+                          self.uc.reg_read(self.isa.reg_pc), err), seq)
 
     def build_ladder(self, writes, golden_length: int, rungs: int = 16):
         """Snapshot at regular INSTRUCTION-COUNT intervals.

@@ -46,8 +46,17 @@ BUILD   := build/$(TARGET)-$(VARIANT)$(OPT)$(BUILD_SUFFIX)
 
 CFLAGS  := $(ARCH) $(OPT) -g3 -ffreestanding -fno-builtin -fno-common \
            -fno-stack-protector -Wall -Wextra -Icommon -Icrypto
+# -lgcc after -nostdlib is deliberate, not a contradiction. -nostdlib drops the
+# C library AND libgcc, but libgcc is the compiler's own runtime, not part of
+# any libc: it supplies the helpers the code generator emits calls to for
+# operations the ISA cannot do in one instruction. RV32I has no 64-bit shift,
+# so sha256's `(uint64_t)len * 8 >> (8*j)` bit-length field becomes a call to
+# __lshrdi3. ARM never needed it because its codegen inlined the same shift, so
+# this only surfaced on the second architecture -- exactly the kind of hidden
+# ISA assumption the cross-architecture port exists to flush out. It is a no-op
+# for the Cortex-M builds, which resolve every symbol without it.
 LDFLAGS := $(ARCH) -nostdlib -nostartfiles -T $(LDSCRIPT) \
-           -Wl,--gc-sections -Wl,-Map=$(BUILD)/fw.map
+           -Wl,--gc-sections -Wl,-Map=$(BUILD)/fw.map -lgcc
 
 SRCS := $(STARTUP) common/oracle.c common/minilib.c
 

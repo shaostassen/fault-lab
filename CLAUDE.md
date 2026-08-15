@@ -6,7 +6,8 @@ Context for agentic sessions on this repo. Read this before changing anything in
 ## What this is
 
 An emulation-based fault injection campaign harness. It corrupts execution of
-bare-metal Cortex-M3 firmware (skip instructions, flip register/memory bits),
+bare-metal firmware (skip instructions, flip register/memory bits) on two
+architectures, Cortex-M3 and RV32I,
 classifies every outcome, and measures which countermeasures actually close
 which attacks. Two targets: a secure boot verifier (security oracle) and a motor
 safety supervisor (safety oracle).
@@ -20,6 +21,9 @@ net loss.
 ```bash
 # build all 12 binaries: {secureboot,supervisor} x {base,hardened} x {-O0,-O2,-Os}
 cd firmware && make matrix
+
+# same cross product on the second architecture -> build/*-rv32
+make matrix-rv32
 
 # single build + disassembly listing
 make TARGET=secureboot VARIANT=hardened OPT=-O2
@@ -38,7 +42,9 @@ python3 analysis/heatmap.py
 ```
 
 Requires `arm-none-eabi-gcc` (apt: `gcc-arm-none-eabi`) and
-`pip install -r requirements.txt`.
+`pip install -r requirements.txt`. The RV32 target additionally needs
+`riscv64-unknown-elf-gcc` (apt: `gcc-riscv64-unknown-elf`) — no libc package
+is required, the firmware ships its own freestanding `common/string.h`.
 
 ## Invariants — do not violate these
 
@@ -172,6 +178,10 @@ firmware/
   common/link_cm3.ld     PINS .oracle at 0x20000000 and .noinit after it
   common/minilib.c       memcpy/memcmp/memcmp_ct — ours because memcmp is an
                          attack target and must be traced code, not libc
+  common/string.h        freestanding prototypes for the above; means the
+                         build needs no C library on either architecture
+  common/startup_rv32.c  RV32I reset (sp set in asm — RISC-V has no
+  common/link_rv32.ld    hardware SP load); same memory map as link_cm3.ld
   secureboot/verify.c              baseline verifier (NOT strawmanned)
   secureboot/verify_hardened.c     C1-C5 countermeasures
   secureboot/main.c                call site; hardened variant uses a
@@ -180,7 +190,12 @@ firmware/
 harness/faultlab/
   target.py              ELF load, pinned symbols, test vector construction
   faults.py              Fault/FaultSet descriptors, campaign generation
+  backend/isa.py         per-architecture constants (registers, mode bit,
+                         instruction width) — the ONLY place the ISA differs
   backend/unicorn_backend.py   emulation, snapshot ladder, fault application
+  backend/gdb_rsp.py     GDB remote-serial-protocol client for the QEMU
+                         backend (MicroBlaze needs it; Unicorn has no such
+                         target)
   classify.py            outcome classification — the judgement lives here
   campaign.py            spawn pool, work distribution
   slice.py               backward taint slice — narrows the candidate set
@@ -289,13 +304,21 @@ documentation, not an assertion in the test itself).
    state (`ORACLE` — no watchdog timeout ever catches this). Necessary, not
    sufficient: the fail-closed argument holds, but "add a watchdog" alone
    only gets you half of "closes the gap."
-8. **MicroBlaze port** — second architecture makes "architecture-independent" a
-   claim rather than an aspiration. Also the detail that makes this project
-   unmistakably the author's, since that is the soft core he ships on.
-   Blocked on item 9: Unicorn has no MicroBlaze support (checked this
-   session — `UC_ARCH_*` lists ARM/ARM64/MIPS/PPC/RISCV/SPARC/X86/M68K/
-   S390X/TriCore, no MicroBlaze), so this needs the QEMU backend first, not
-   after, despite the original ordering below.
+8. ~~**Second architecture**~~ — done for RV32I, see RESULTS.md ("Second
+   architecture: RV32I, and hardening is 3x weaker on it"). Unicorn has a
+   RISC-V target, so this did NOT need the QEMU backend; `ISA=rv32` in the
+   firmware Makefile plus `backend/isa.py` descriptors carry it. Qualitative
+   claim replicates (hardened `-O0` is 0/0/0 on both; rollback and bad_magic
+   closed at every `-O` level on both); hardening is 3x weaker on RV32I
+   against `forged` (23→7 vs 22→2 at `-O2`). Caveat that matters: the two
+   toolchains are different GCC majors (15.3.1 vs 14.2.0), which this project
+   already knows moves baseline counts — so the quantitative gap is
+   confounded, the qualitative replication is not.
+
+   **MicroBlaze** still needs the QEMU backend: Unicorn has no MicroBlaze
+   target (`UC_ARCH_*` lists ARM/ARM64/MIPS/PPC/RISCV/SPARC/X86/M68K/S390X/
+   TriCore). `qemu-system-microblaze` is installed on the server and
+   `backend/gdb_rsp.py` is written and validated against a real gdbstub.
 9. **QEMU backend** for cross-validation. Agreement is a correctness argument;
    disagreement localises where the emulator abstraction changes the security
    conclusion, which is itself a finding. Also the actual prerequisite for

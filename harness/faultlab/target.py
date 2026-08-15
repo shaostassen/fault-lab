@@ -81,21 +81,46 @@ class Target:
     initial_sp: int
     entry: int
     symbols: dict[str, int] = field(default_factory=dict)
+    isa: object = None          # backend.isa.Isa, resolved from the ELF
 
     @classmethod
     def load(cls, build_dir: str | Path) -> "Target":
         build_dir = Path(build_dir)
         flash = (build_dir / "fw.bin").read_bytes()
-        sp, entry = struct.unpack("<II", flash[:8])
         syms: dict[str, int] = {}
         with open(build_dir / "fw.elf", "rb") as fh:
             elf = ELFFile(fh)
+            machine = elf.header["e_machine"]
+            elf_entry = elf.header["e_entry"]
             symtab = elf.get_section_by_name(".symtab")
             for s in symtab.iter_symbols():
                 if s.name:
                     syms[s.name] = s["st_value"]
+
+        # Imported here rather than at module scope: target.py is imported by
+        # the campaign parent process, and backend.isa pulls in unicorn. See
+        # campaign.py's fork-safety note -- the parent must stay emulator-free.
+        from .backend.isa import BY_ELF_MACHINE
+        isa = BY_ELF_MACHINE.get(machine)
+        if isa is None:
+            raise ValueError(f"{build_dir}: unsupported ELF machine {machine!r}")
+
+        if isa.name == "cm3":
+            # Cortex-M loads SP and the reset vector from the first two words of
+            # flash, in hardware. Read them from the image so the harness resets
+            # the core the way silicon would.
+            sp, entry = struct.unpack("<II", flash[:8])
+            entry &= ~1  # strip the Thumb bit; the backend re-applies it
+        else:
+            # RISC-V has no such convention: reset just begins executing at the
+            # entry point with SP undefined, which is why startup_rv32.c
+            # establishes SP in asm. Take entry from the ELF header and SP from
+            # the linker-provided symbol.
+            entry = elf_entry
+            sp = syms["_stack_top"]
+
         return cls(name=build_dir.name, flash=flash, initial_sp=sp,
-                   entry=entry & ~1, symbols=syms)
+                   entry=entry, symbols=syms, isa=isa)
 
     def sym(self, name: str) -> int:
         return self.symbols[name]

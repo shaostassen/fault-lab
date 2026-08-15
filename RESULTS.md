@@ -309,6 +309,80 @@ against.** Against a real constant, it holds under both single- and
 double-fault search. Against a second, correctly-computed but
 un-independently-validated value, it doesn't.
 
+## Second architecture: RV32I, and hardening is 3x weaker on it
+
+"Architecture-independent" was an aspiration in this document for a long time.
+It is now a measurement. The same firmware, same test vectors, same fault
+model, same classifier and the same *memory map* (flash at 0, RAM at
+0x20000000, `.oracle` pinned at 0x20000000 -- `link_rv32.ld` mirrors
+`link_cm3.ld` deliberately) now build and run for RV32I as well as Cortex-M3.
+Unicorn drives both, so the second architecture did not have to wait on the
+QEMU backend; only MicroBlaze does, because Unicorn has no MicroBlaze target.
+
+Single fault, exhaustive, all counts independently confirmed genuine
+(`verdict == V_BOOT_ACCEPT` on every one of the 211 exploitable results --
+after bug 5 below, a count is not a finding until the ground-truth field
+agrees with it):
+
+| build | ARM f/r/b | RV32 f/r/b | ARM forged per 10k runs | RV32 forged per 10k runs |
+|---|---|---|---|---|
+| base -O0 | 62/23/16 | 51/24/18 | 13.66 | 9.83 |
+| **hardened -O0** | **0/0/0** | **0/0/0** | 0.00 | 0.00 |
+| base -O2 | 22/9/6 | 23/7/14 | 14.14 | 9.53 |
+| hardened -O2 | 2/0/0 | 7/0/0 | 0.62 | 1.41 |
+| base -Os | 24/8/4 | 25/19/19 | 13.92 | 9.64 |
+| hardened -Os | 2/0/0 | 4/0/0 | 0.55 | 0.74 |
+
+**What replicates.** The central qualitative claim holds on both
+architectures without qualification: hardening closes `rollback` and
+`bad_magic` to exactly zero at every optimisation level, and hardened `-O0` is
+0/0/0 -- fully closed, the best cell in the matrix -- on both. The
+countermeasure design, not the ISA, is what produces that result. That is the
+strongest form the architecture-independence claim has had here, because it is
+now a replication rather than an assertion.
+
+**What does not replicate, and is the more interesting half.** Hardening is
+measurably *less effective* on RV32I against `forged`:
+
+```
+forged, hardening reduction:   ARM 22 -> 2  (11.0x)      RV32 23 -> 7  (3.3x)   at -O2
+                               ARM 24 -> 2  (12.0x)      RV32 25 -> 4  (6.2x)   at -Os
+```
+
+And the direction reverses between base and hardened builds. Normalised per
+10,000 runs, the *unhardened* RV32 build is consistently the less susceptible
+of the two (9.5-9.8 vs 13.7-14.1), while the *hardened* RV32 build is more
+susceptible (1.41 vs 0.62 at `-O2`). So RV32I is not simply "weaker": it
+starts with a smaller per-instruction attack surface and keeps more of it
+after the countermeasures are applied. The residual is concentrated in exactly
+the place the `-O2` survivor analysis above identified on ARM -- the C4 check
+block, where the redundant passes only verify agreement with each other -- and
+RV32I needs more instructions to express that same block (12,430 vs 8,119
+golden instructions at hardened `-O2`), giving a skip fault more places to
+land inside a weakness that is structural rather than architectural.
+
+**Threats to validity specific to this comparison, and they are real:**
+
+- **The two toolchains are different compiler versions.** ARM is
+  `arm-none-eabi-gcc` 15.3.1; RISC-V is `riscv64-unknown-elf-gcc` 14.2.0
+  (Ubuntu's packaged bare-metal cross-compiler). This document already
+  establishes that baseline counts move with compiler version -- that is what
+  the "Compiler sweep" section is about -- so some unknown part of the gap
+  between these columns is compiler generation, not ISA. Closing this needs
+  the same GCC major version on both targets before the quantitative claim
+  should be leaned on. The *qualitative* replication (0/0/0 hardened `-O0`,
+  rollback and bad_magic closed everywhere) is robust to this, since it does
+  not depend on the exact counts.
+- **RV32I versus Thumb-2 is not a like-for-like ISA comparison.** Different
+  code density (RV32I has no compressed instructions here, by choice -- see
+  the Makefile), 32 architectural registers versus 16, different calling
+  convention. "Architecture" in this table means ISA plus ABI plus codegen
+  together, and it is not possible to separate them with this experiment.
+- The RV32 build deliberately does not set `mtvec`, so traps are surfaced by
+  the emulator as `CPUFAULT` rather than vectored by firmware. This matches
+  how the Cortex-M build behaves under Unicorn in practice, but it is a
+  difference from silicon on both targets, not a property of either ISA.
+
 ## Safety supervisor: software hardening does not close this
 
 | build | overcurrent | deadline_miss | runs | golden | rate |
@@ -691,6 +765,17 @@ bypass survives review far longer than a missing one.
    Watchdog is necessary, not sufficient; the remaining half needs a mitigation
    that doesn't depend on CPU liveness, e.g. a hardware trip on the actual
    gate-driver output.
-7. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
-8. QEMU backend for cross-validation; disagreement between backends localises
+7. ~~**Second architecture**~~ -- done, see "Second architecture: RV32I"
+   above. Delivered on Unicorn rather than QEMU (Unicorn has RISC-V; only
+   MicroBlaze actually requires the QEMU backend). Qualitative claim
+   replicates; hardening measured 3x weaker on RV32I against `forged`.
+8. **Match the compiler generation across architectures.** The RV32 column was
+   built with GCC 14.2.0 against ARM's 15.3.1, and this document already shows
+   baseline counts move with compiler version -- so the *quantitative* part of
+   the cross-architecture gap is confounded until both targets are built with
+   the same GCC major version.
+9. **MicroBlaze port**, which does need the QEMU backend: Unicorn has no
+   MicroBlaze target at all. `qemu-system-microblaze` is installed on the
+   server; the GDB RSP client (`backend/gdb_rsp.py`) is written and validated.
+10. QEMU backend for cross-validation; disagreement between backends localises
    where the abstraction gap changes the security conclusion.
