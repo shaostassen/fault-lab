@@ -279,9 +279,16 @@ documentation, not an assertion in the test itself).
    single-fault supervisor run), not assumed from bug 5. 22-58 mismatches per
    build/vector, both directions (would-mask and would-fabricate). Fixed;
    supervisor table in RESULTS.md corrected; qualitative conclusion survived.
-7. **Independent watchdog model** for the supervisor. The current result says
-   fail-closed is unachievable in software — model a watchdog that drives
-   gate-driver enable low on timeout and show it closes the gap.
+7. ~~**Independent watchdog model**~~ — done, see RESULTS.md ("Watchdog
+   model: closes about half the gap"). Split `SAFETY_VIOLATION` results by
+   `halt_reason` instead of simulating one arbitrary timeout — a liveness
+   watchdog catches "CPU stopped" at any reasonable timeout, so the split
+   itself is the timeout-independent version of the claim. Result: 51.3%
+   of violations are the CPU actually stopping (`CPUFAULT`/`BUDGET` — a
+   watchdog closes these by definition), 48.7% are a clean halt with wrong
+   state (`ORACLE` — no watchdog timeout ever catches this). Necessary, not
+   sufficient: the fail-closed argument holds, but "add a watchdog" alone
+   only gets you half of "closes the gap."
 8. **MicroBlaze port** — second architecture makes "architecture-independent" a
    claim rather than an aspiration. Also the detail that makes this project
    unmistakably the author's, since that is the soft core he ships on.

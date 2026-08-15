@@ -49,6 +49,11 @@ class Row:
     instructions: int
     verdict: int
     marks: int
+    halt_reason: int      # HaltReason: was this a clean oracle halt, or did
+                          # the CPU crash/hang? Distinguishes "software chose
+                          # wrong" from "software stopped responding" -- see
+                          # the watchdog-model analysis in RESULTS.md, which a
+                          # SAFETY_VIOLATION outcome alone can't distinguish.
     triggers: str        # comma-joined, for multi-fault tuples
 
 
@@ -82,7 +87,7 @@ def _run_one(fs: FaultSet) -> Row:
         trigger=f0.trigger, pc=res.final_pc, model=int(f0.model),
         target_reg=f0.target, value=f0.value, outcome=int(oc),
         instructions=res.instructions, verdict=res.oracle.verdict,
-        marks=res.oracle.marks,
+        marks=res.oracle.marks, halt_reason=int(res.halt_reason),
         triggers=",".join(str(f.trigger) for f in fs.faults),
     )
 

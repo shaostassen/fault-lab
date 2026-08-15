@@ -347,6 +347,60 @@ Note the asymmetry with the bootloader. A security oracle is one decision at
 attacker-chosen timing, and software countermeasures close it almost completely.
 A safety oracle is a continuously re-evaluated invariant, and they barely move it.
 
+### Watchdog model: closes about half the gap, and exactly which half is the finding
+
+An independent hardware watchdog needs a specific timeout to simulate in full
+-- but picking one is picking an arbitrary number, and the interesting claim
+doesn't depend on it. A liveness watchdog's entire job, at any timeout, is to
+catch a CPU that has stopped responding. So split every `SAFETY_VIOLATION`
+above by `halt_reason` instead of simulating a specific timer: did the CPU
+actually stop (`CPUFAULT`/`BUDGET` -- a watchdog catches this by definition,
+regardless of the exact timeout chosen), or did it run to a clean halt with
+the wrong state (`ORACLE` -- a liveness watchdog cannot distinguish this from
+correct operation, at any timeout, because nothing about it looks like
+non-responsiveness)?
+
+| build | vector | violations | CPU stopped | CPU alive, wrong | watchdog closes |
+|---|---|---|---|---|---|
+| base -O2 | overcurrent | 71 | 43 | 28 | 60.6% |
+| base -O2 | deadline_miss | 68 | 43 | 25 | 63.2% |
+| hardened -O2 | overcurrent | 118 | 70 | 48 | 59.3% |
+| hardened -O2 | deadline_miss | 120 | 72 | 48 | 60.0% |
+| base -O0 | overcurrent | 125 | 51 | 74 | 40.8% |
+| base -O0 | deadline_miss | 126 | 51 | 75 | 40.5% |
+| hardened -O0 | overcurrent | 188 | 93 | 95 | 49.5% |
+| hardened -O0 | deadline_miss | 190 | 93 | 97 | 48.9% |
+| **total** | | **1,006** | **516** | **490** | **51.3%** |
+
+**An independent watchdog closes about half the gap, not all of it.** The
+other half -- 490 of 1,006 across this matrix -- is a CPU that never stops:
+it halts cleanly via `oracle_halt()`, on schedule, with a fault having
+corrupted *which* state it reports rather than whether it keeps running. No
+watchdog timeout, however short, catches that, because there's no
+non-responsiveness to time out on.
+
+Looking closer at that second half: 95%+ of them (471 of 490, tallied per
+build/vector) have `pwm_duty` correctly at `0` and only `sup_state` wrong --
+the state-machine bookkeeping fails to land on `SUP_SAFE` while the one
+output that actually drives the motor is already off. That is genuine
+partial credit for the hardened build's redundancy (the physically dangerous
+output is usually right even when the run is classified a violation), but it
+does not make the finding go away: the invariant this project set out to test
+is `sup_state == SAFE AND pwm_duty == 0`, both terms, and a `sup_state` that
+silently disagrees with reality is exactly the kind of corrupted bookkeeping
+that downstream logic (re-arm conditions, fault logging, a human reading a
+status register) would trust and shouldn't.
+
+**The complete engineering conclusion, not just "add a watchdog":** an
+independent liveness watchdog is necessary but provably not sufficient here.
+It's the right fix for the crash/hang half of the gap, cleanly, and nothing
+else fixes that half as simply. The other half needs a mitigation that
+doesn't depend on CPU liveness at all -- e.g. an independent hardware trip on
+the actual gate-driver output (monitoring current or duty cycle directly,
+not trusting software's internal state variable), since by construction nothing
+that watches "is the CPU still running" can ever catch "the CPU is running
+fine and confidently wrong."
+
 ## Throughput
 
 ~200-9,300 runs/s depending on trace length and worker count. Two honest notes:
@@ -626,7 +680,17 @@ bypass survives review far longer than a missing one.
    directions (would-mask and would-fabricate). Fixed the same way bug 5 was
    fixed. The supervisor table above is corrected; the qualitative conclusion
    (hardening only marginally helps) survived, unlike bug 5's `-O0` reversal.
-6. Independent watchdog model for the supervisor, per the fail-closed argument.
+6. ~~**Independent watchdog model**~~ — done, see "Watchdog model: closes
+   about half the gap" above. Split existing `SAFETY_VIOLATION` results by
+   `halt_reason` rather than simulating one specific timeout (a liveness
+   watchdog catches CPU-stopped at *any* reasonable timeout, so the split is
+   timeout-independent): **51.3% of violations are a CPU that stopped
+   responding** (a watchdog closes these by definition) **and 48.7% are a CPU
+   that completed a clean halt with the wrong state** (no watchdog timeout
+   catches this, ever -- there's no non-responsiveness to time out on).
+   Watchdog is necessary, not sufficient; the remaining half needs a mitigation
+   that doesn't depend on CPU liveness, e.g. a hardware trip on the actual
+   gate-driver output.
 7. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
 8. QEMU backend for cross-validation; disagreement between backends localises
    where the abstraction gap changes the security conclusion.

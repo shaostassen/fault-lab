@@ -122,12 +122,14 @@ Determinism is gated: `python3 harness/tests/test_determinism.py`.
 
 Backward taint slicing (`harness/faultlab/slice.py`), double-fault campaigns
 against hardened `-O2` (full 95.9M-pair search, not just a seeded sample --
-see RESULTS.md), and a GA multi-fault search (`harness/faultlab/ga.py`) are
-all built. See CLAUDE.md's Open work list for current numbers and what's next
--- as of this writing, that's redoing the triple-fault search bug 5
-invalidated, auditing the supervisor classifier for the same failure shape,
-then the watchdog model, QEMU backend, and MicroBlaze port (in that order --
-Unicorn has no MicroBlaze support, so QEMU is the real prerequisite).
+see RESULTS.md), a GA multi-fault search (`harness/faultlab/ga.py`), and the
+supervisor watchdog model are all built -- the last of these found that an
+independent watchdog closes only about half of the safety-oracle gap (the
+half where the CPU actually stops; the other half is a clean halt with wrong
+state, which no liveness watchdog can ever catch). See CLAUDE.md's Open work
+list for current numbers and what's next -- as of this writing, that's the
+QEMU backend and MicroBlaze port (in that order -- Unicorn has no MicroBlaze
+support, so QEMU is the real prerequisite).
 
 ## Quickstart
 
