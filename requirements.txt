@@ -1,0 +1,11 @@
+# Emulation + decoding
+unicorn==2.1.4
+capstone>=5.0
+
+# ELF symbol resolution (pinned addresses come from the linker, but symbol
+# lookup is how the harness maps triggers back to function names)
+pyelftools>=0.30
+
+# Results store + analysis
+pyarrow>=15.0
+duckdb>=0.10

@@ -1,0 +1,25 @@
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  campaign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install ARM toolchain
+        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+      - name: Install python deps
+        run: pip install -r requirements.txt
+      - name: Build firmware matrix
+        run: make build
+      # The determinism gate is the real test. It catches the entire class of
+      # bug this harness is prone to: cross-run state leakage, fork-inherited
+      # emulator state, anything that makes results depend on execution order.
+      - name: Determinism gate
+        run: make check
+      - name: Security regression gate
+        run: cd harness && python3 tests/test_regression.py

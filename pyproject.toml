@@ -1,0 +1,20 @@
+[project]
+name = "faultlab"
+version = "0.2.0"
+description = "Emulation-based fault injection campaign harness for safety-critical firmware"
+requires-python = ">=3.10"
+dependencies = [
+    "unicorn==2.1.4",
+    "capstone>=5.0",
+    "pyelftools>=0.30",
+    "pyarrow>=15.0",
+    "duckdb>=0.10",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["harness"]
+include = ["faultlab*"]
