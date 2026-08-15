@@ -138,16 +138,22 @@ Determinism gate reference: `secureboot-base-O2` / `forged` must give exactly
 
 ## Open work, roughly in order
 
-1. **Disassembly diff, hardened `-O0` vs `-O2`** — explain the two surviving
-   forged bypasses at `-O2`. `make VARIANT=hardened OPT=-O2` emits `fw.lst`.
-   Check whether the optimiser folded a duplicated check despite `volatile`.
+1. ~~**Disassembly diff, hardened `-O0` vs `-O2`**~~ — done, see RESULTS.md
+   ("The two `-O2` survivors: agreement is not validation"). Not a folding
+   issue: C2's duplicated checks stay structurally distinct at `-O2`. The gap
+   is in C4 — `cmp_a != cmp_b` and `memcmp_ct(d1, d2, 32)` only check that the
+   two redundant hash passes *agree with each other*, which an unfaulted
+   forged image satisfies trivially. Both survivors are 4-instruction skips
+   that remove the `bne` checking one pass against zero, landing straight in
+   the agreement checks.
 2. **Backward slicing** (`harness/faultlab/slice.py`, not yet written) — taint
    from the decision branch back through the golden trace to find instructions
    that can influence it. This is what makes multi-fault tractable; blind
    |trace|^2 is not.
 3. **Double-fault campaigns** against hardened `-O2`. Single fault is closed
    there; two may not be. Use `multi_fault_from_candidates()` on the slice
-   output plus single-fault near-misses (SDC outcomes are the seed set).
+   output plus single-fault near-misses (SDC outcomes are the seed set). The
+   two `-O2` survivor sites from item 1 are a ready-made seed pair.
 4. **Independent watchdog model** for the supervisor. The current result says
    fail-closed is unachievable in software — model a watchdog that drives
    gate-driver enable low on timeout and show it closes the gap.

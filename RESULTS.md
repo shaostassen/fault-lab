@@ -58,8 +58,75 @@ instructions between a decision and its consequence. Debug builds are not just
 slower, they are a materially larger attack surface.
 
 The hardened build inverts this: `-O0` is the *worst* hardened configuration
-(4/4/4) and `-O2` the best (2/0/0). Explaining the two `-O2` forged survivors
-via disassembly diff is the next open item.
+(4/4/4) and `-O2` the best (2/0/0).
+
+### The two `-O2` survivors: agreement is not validation
+
+Disassembly diff against the `-O0` build ruled out the obvious suspect first:
+C2's divergently-duplicated checks are *not* folded at `-O2`. Every `if (x)
+return FAIL; if (!(x)) return FAIL;` pair survives as two structurally distinct
+comparisons in `verify_image_hardened`'s object code. The optimiser did not
+remove the countermeasure.
+
+The actual gap is in what C4 checks. The signature stage runs two independent
+hash-and-compare passes and gates on four conditions in sequence:
+
+```c
+if (cmp_a != 0)                        return VERIFY_FAIL;
+if (cmp_b != 0)                        return VERIFY_FAIL;
+if (cmp_a != cmp_b)                    return VERIFY_FAIL;
+if (memcmp_ct(d1, d2, 32) != 0)        return VERIFY_FAIL;
+```
+
+The first two are the only checks that validate against a known-good value
+(zero). The last two only check that the **two redundant computations agree
+with each other** -- and for an unmodified forged image, they always do: `d1`
+and `d2` are both computed correctly (the fault never touches the hash math,
+only the control flow), so they consistently mismatch the tag in the same way.
+`cmp_a == cmp_b` and `d1 == d2` hold regardless of whether the image is
+legitimate. C4's redundancy defends against a fault that makes the two passes
+*diverge* from each other; it adds nothing against a fault that just removes
+the branch checking one of them against zero, because everything downstream of
+that branch is an agreement check a real forged image already satisfies.
+
+Both surviving faults are 4-instruction skips (`FaultModel.SKIP`, `k=4`),
+triggered at instruction counts 8105 and 8106 -- one instruction-count apart,
+the coarsest-granularity view of the same blind spot. Mapped to addresses in
+`secureboot-hardened-O2/fw.lst`:
+
+```
+56e: ldr  r2, [sp, #16]      ; cmp_a
+570: cmp  r2, #0
+572: bne.n 4d8 <...+0x70>    ; reject if cmp_a != 0
+574: ldr  r2, [sp, #20]      ; cmp_b
+576: cmp  r2, #0
+578: bne.n 4d8 <...+0x70>    ; reject if cmp_b != 0
+57a: ldr  r1, [sp, #16]      ; cmp_a != cmp_b starts here
+```
+
+A skip fault is applied by decoding `k` instructions forward **from the
+current PC in memory order** (`UnicornBackend._skip_bytes`) and jumping past
+their combined byte width -- it does not follow branches. Trigger 8105 lands
+with PC at `0x570` and skips the 8 bytes spanning `cmp_a`'s compare-and-branch
+plus `cmp_b`'s load-and-compare, landing exactly on `0x578`. Trigger 8106
+starts one instruction later, at `0x572`, and skips both `bne` branches
+outright, landing on `0x57a` -- past both zero-checks, straight into the
+mutual-agreement checks that a forged image passes for free.
+
+Confirmed on `arm-none-eabi-gcc` 15.3.1 (Arm GNU Toolchain 15.3.Rel1); the
+survivor count and addresses are unchanged from the 13.2.1 baseline measured
+above, so this is a codegen-independent property of the check structure, not
+an artifact of one compiler version. (Baseline `-O2`/forged does drift with
+compiler version -- 24 at 13.2.1 vs 32 at 15.3.1 -- but that cell is the
+deliberately-unhardened control and isn't the claim being made here.)
+
+**The fix is not "add a fifth check."** Any check reachable only through the
+same control-flow gate has the same blind spot. What's missing is validating
+`cmp_a` and `cmp_b` against zero *independently of the branch that currently
+does it* -- e.g. folding the zero-check into the CFI accumulator (C3) so a
+skipped branch also produces a wrong CFI value at the C5 re-verification,
+rather than leaving zero-validation resting on a single pair of `bne`s with no
+redundant path to the same conclusion.
 
 ## Safety supervisor: software hardening does not close this
 
@@ -166,10 +233,11 @@ bypass survives review much longer than a missing one.
 
 ## Next
 
-1. Disassembly diff of hardened `-O0` vs `-O2` to explain the two survivors.
-2. Backward slicing to narrow the multi-fault space, then double-fault campaigns
-   against hardened `-O2`. Single fault is closed; two may not be.
-3. Independent watchdog model for the supervisor, per the fail-closed argument.
-4. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
-5. QEMU backend for cross-validation; disagreement between backends localises
+1. Backward slicing to narrow the multi-fault space, then double-fault campaigns
+   against hardened `-O2`. Single fault is closed; two may not be -- and the two
+   known survivor sites above are exactly the kind of near-miss `slice.py`
+   should seed a multi-fault search from.
+2. Independent watchdog model for the supervisor, per the fail-closed argument.
+3. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
+4. QEMU backend for cross-validation; disagreement between backends localises
    where the abstraction gap changes the security conclusion.
