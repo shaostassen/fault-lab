@@ -9,22 +9,27 @@ what countermeasures actually close.
 
 ```
 firmware/
-  common/       oracle protocol, startup, linker script
+  common/       oracle protocol, startup, linker script, minilib (memcpy etc.)
+  crypto/       sha256.c -- stands in for Ed25519 on runtime budget
   secureboot/   image format, verify.c (baseline) + verify_hardened.c
-  supervisor/   motor safety state machine
+  supervisor/   motor safety state machine, baseline + hardened
   Makefile      builds the {base,hardened} x {-O0,-O2,-Os} matrix
 harness/
   faultlab/
-    faults.py           fault descriptors, campaign generation
-    backend/base.py     backend interface + snapshot ladder
-    backend/unicorn_backend.py
-    golden.py           TODO: golden trace capture
-    slice.py            TODO: backward taint narrowing
-    campaign.py         TODO: worker pool, work stealing
-    classify.py         TODO: outcome classification
-    store.py            TODO: parquet writer
-analysis/       duckdb queries, heatmap export
-docs/           security risk management report
+    target.py                  ELF load, pinned symbols, test vectors
+    faults.py                  Fault/FaultSet descriptors, campaign generation
+    backend/unicorn_backend.py emulation, snapshot ladder, fault application
+                                (golden trace capture lives here, in .trace())
+    classify.py                outcome classification
+    campaign.py                spawn pool, work distribution
+    slice.py                   backward taint slice -- multi-fault candidate
+                                narrowing (see CLAUDE.md Open work item 2)
+    store.py                   parquet writer
+    cli.py                     sweep / matrix entry points
+  tests/
+    test_determinism.py        THE GATE -- same result at 1/2/4/8 workers
+    test_regression.py         security regression floor/ceiling gate
+analysis/       heatmap.py -- self-contained interactive HTML, no build step
 ```
 
 ## Build
@@ -109,8 +114,12 @@ because the failure modes generalise past this project.
 
 Determinism is gated: `python3 harness/tests/test_determinism.py`.
 
-Not yet built: backward slicing for multi-fault narrowing, GA search, QEMU
-backend, MicroBlaze port, watchdog model.
+Backward taint slicing (`harness/faultlab/slice.py`) is built and narrows the
+multi-fault candidate set -- see CLAUDE.md Open work item 2 for numbers.
+
+Not yet built: double-fault campaigns against hardened `-O2` (slicing is the
+prerequisite, now done), GA search, QEMU backend, MicroBlaze port, watchdog
+model.
 
 ## Quickstart
 

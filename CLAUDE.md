@@ -111,6 +111,8 @@ harness/faultlab/
   backend/unicorn_backend.py   emulation, snapshot ladder, fault application
   classify.py            outcome classification — the judgement lives here
   campaign.py            spawn pool, work distribution
+  slice.py               backward taint slice — narrows the candidate set
+                         for multi-fault search (see Open work item 1)
   store.py               parquet writer
   cli.py                 sweep / matrix entry points
 analysis/heatmap.py      self-contained interactive HTML, no build step
@@ -146,14 +148,25 @@ Determinism gate reference: `secureboot-base-O2` / `forged` must give exactly
    forged image satisfies trivially. Both survivors are 4-instruction skips
    that remove the `bne` checking one pass against zero, landing straight in
    the agreement checks.
-2. **Backward slicing** (`harness/faultlab/slice.py`, not yet written) — taint
-   from the decision branch back through the golden trace to find instructions
-   that can influence it. This is what makes multi-fault tractable; blind
-   |trace|^2 is not.
+2. ~~**Backward slicing**~~ — done, `harness/faultlab/slice.py`. Dynamic
+   backward slice seeded on both the oracle verdict/marks memory locations
+   (dataflow) and every conditional branch on the golden path whose static PC
+   repeats at most `loop_repeat_threshold` times (control flow — see the
+   module docstring for why address direction alone can't tell a decision
+   branch from a loop back-edge here, and why CPSR needs a manual assist:
+   capstone under-reports the implicit flags read on a conditional branch).
+   Narrows `secureboot-hardened-O2`/forged from 8,119 to 3,462 candidates
+   (42.6%); shorter vectors narrow further (`bad_magic` 58→36, `rollback`
+   74→48). Validated against the item-1 survivors: both 8105 and 8106 are in
+   the slice. Still coarse — dataflow through `memcmp_ct`'s byte-compare loop
+   legitimately pulls in every byte, since the constant-time compare's result
+   really does depend on all of them — so this narrows, it does not minimize.
 3. **Double-fault campaigns** against hardened `-O2`. Single fault is closed
-   there; two may not be. Use `multi_fault_from_candidates()` on the slice
-   output plus single-fault near-misses (SDC outcomes are the seed set). The
-   two `-O2` survivor sites from item 1 are a ready-made seed pair.
+   there; two may not be. Use `multi_fault_from_candidates()` (faults.py) on
+   `slice.as_skip_faults(boot_decision_slice(...))` plus single-fault
+   near-misses (SDC outcomes are the seed set). The two `-O2` survivor sites
+   from item 1 are a ready-made seed pair to start from before running the
+   full candidate set.
 4. **Independent watchdog model** for the supervisor. The current result says
    fail-closed is unachievable in software — model a watchdog that drives
    gate-driver enable low on timeout and show it closes the gap.
