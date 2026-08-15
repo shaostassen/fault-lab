@@ -128,6 +128,67 @@ skipped branch also produces a wrong CFI value at the C5 re-verification,
 rather than leaving zero-validation resting on a single pair of `bne`s with no
 redundant path to the same conclusion.
 
+## Double-fault campaigns against hardened -O2
+
+Single fault is closed for `rollback` and `bad_magic` at `-O2` (0/0 above).
+Two faults might not be, and *forged* already has known single-fault bypasses,
+so it doesn't test anything new by itself -- the open question is specifically
+whether the two genuinely closed vectors stay closed against a two-fault
+attacker.
+
+### `rollback` and `bad_magic`: still closed, exhaustively
+
+Both vectors halt almost immediately at `-O2` -- `bad_magic` fails the very
+first check (58-instruction golden trace) and `rollback` fails the version
+check before any hash work happens (74 instructions) -- so an **exhaustive**
+double-fault search needed no slicing at all: every instruction in the golden
+trace, all four skip widths, every pairing (`min_separation=1`).
+
+| vector | single-fault candidates | double-fault sets | exploitable |
+|---|---|---|---|
+| bad_magic | 232 | 26,448 | **0** |
+| rollback | 296 | 43,216 | **0** |
+
+Zero exploitable outcomes across both, run to completion in under a second.
+This is a stronger claim than the single-fault result: it is not just that no
+*single* instruction skip anywhere in these traces reopens either vector, it's
+that no *pair* of skips does either, at any two points, any two widths. Given
+how thin these traces are, an attacker capable of two independent glitches has
+essentially the whole golden run available and still can't reopen either
+vector at `-O2`.
+
+### `forged`: no novel double-fault-only bypass found, in the region searched
+
+`forged`'s golden trace is 8,119 instructions -- too long to search
+exhaustively at order 2 (the full slice-narrowed candidate set is 3,462
+triggers x 4 widths = 13,848 descriptors, C(13848,2) ~= 96M pairs, not run
+here). The question worth asking with a bounded search is narrower: is there a
+double-fault bypass where **neither fault alone would work**, i.e. a real
+combination effect distinct from "one of the two known single-fault survivors
+plus an inert second fault somewhere else"?
+
+Seed set: the 33 distinct trigger points with an `SDC` outcome in the
+single-fault sweep, intersected with the `slice.py` candidate set (26), unioned
+with the two known survivor triggers (8105, 8106) -- 28 unique triggers, 112
+fault descriptors across widths, 6,048 double-fault pairs from combining that
+seed set with itself.
+
+- 22 exploitable double-fault sets found.
+- **All 22 contain trigger 8105 or 8106** -- every one is a known single-fault
+  survivor paired with a second fault that doesn't interfere with it, not a
+  new combination effect.
+- 0 exploitable sets found that don't contain a known survivor.
+
+**This is not "hardened `-O2`/forged is closed against a genuinely novel
+double fault."** It is "no novel double-fault-only bypass turned up in a
+6,048-pair search seeded from SDC near-misses intersected with the slice."
+The other ~99.994% of the 96M-pair full space (any pair drawn from the full
+3,462-candidate slice, not touching an SDC near-miss or a known survivor) is
+unsearched. Given SDC outcomes are specifically the runs that already diverge
+from golden behaviour without reaching a verdict -- the textbook near-miss
+signal for multi-fault seeding -- this was the highest-yield region to check
+first, not a substitute for the full search.
+
 ## Safety supervisor: software hardening does not close this
 
 | build | overcurrent | deadline_miss | runs | golden |
@@ -233,11 +294,17 @@ bypass survives review much longer than a missing one.
 
 ## Next
 
-1. Backward slicing to narrow the multi-fault space, then double-fault campaigns
-   against hardened `-O2`. Single fault is closed; two may not be -- and the two
-   known survivor sites above are exactly the kind of near-miss `slice.py`
-   should seed a multi-fault search from.
-2. Independent watchdog model for the supervisor, per the fail-closed argument.
-3. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
-4. QEMU backend for cross-validation; disagreement between backends localises
+1. **Full-space double-fault search on `forged`/hardened-`-O2`.** The seeded
+   6,048-pair search above found no novel double-fault-only bypass, but it
+   covered a small fraction of the ~96M-pair full slice space. Worth running
+   to completion (est. ~50 min at the throughput measured here) or, better,
+   worth narrowing further first -- e.g. a second slice pass seeded on the
+   two known survivors' *data* dependencies specifically, not just SDC
+   near-misses, to shrink the space before brute-forcing it.
+2. GA search over the residual space, per the original roadmap -- now that
+   `slice.py` exists to seed it and the double-fault baseline above exists to
+   compare against.
+3. Independent watchdog model for the supervisor, per the fail-closed argument.
+4. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
+5. QEMU backend for cross-validation; disagreement between backends localises
    where the abstraction gap changes the security conclusion.

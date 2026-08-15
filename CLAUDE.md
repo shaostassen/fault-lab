@@ -161,12 +161,16 @@ Determinism gate reference: `secureboot-base-O2` / `forged` must give exactly
    the slice. Still coarse — dataflow through `memcmp_ct`'s byte-compare loop
    legitimately pulls in every byte, since the constant-time compare's result
    really does depend on all of them — so this narrows, it does not minimize.
-3. **Double-fault campaigns** against hardened `-O2`. Single fault is closed
-   there; two may not be. Use `multi_fault_from_candidates()` (faults.py) on
-   `slice.as_skip_faults(boot_decision_slice(...))` plus single-fault
-   near-misses (SDC outcomes are the seed set). The two `-O2` survivor sites
-   from item 1 are a ready-made seed pair to start from before running the
-   full candidate set.
+3. ~~**Double-fault campaigns**~~ — partially done, see RESULTS.md
+   ("Double-fault campaigns against hardened -O2"). `rollback` and `bad_magic`
+   are **exhaustively confirmed closed** against two faults (26,448 and 43,216
+   pairs, 0 exploitable — these traces are short enough to brute-force fully,
+   no slicing needed). `forged` got a bounded 6,048-pair search seeded from
+   SDC near-misses ∩ the item-2 slice, unioned with the two known survivors:
+   0 novel double-fault-only bypasses, but every one of the 22 exploitable
+   pairs found just combines a known survivor with an inert second fault —
+   this covers a small fraction of the ~96M-pair full slice space, not all of
+   it. Full-space search on `forged` is RESULTS.md's next item.
 4. **Independent watchdog model** for the supervisor. The current result says
    fail-closed is unachievable in software — model a watchdog that drives
    gate-driver enable low on timeout and show it closes the gap.
