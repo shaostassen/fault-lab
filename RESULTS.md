@@ -1,14 +1,18 @@
 # Campaign results
 
 All numbers below are measured output from `python -m faultlab.cli matrix`,
-regenerated after three harness bugs were found and fixed (documented below —
-all three silently corrupted results, in opposite directions).
+regenerated after five harness bugs were found and fixed (documented below —
+all five silently corrupted results, mostly in the direction of inflating
+findings that weren't real).
 
 Determinism is gated by `harness/tests/test_determinism.py`: same binary, same
 fault set, worker counts 1/2/4/8, identical exploitable sets required.
 
-Target: Cortex-M3, `arm-none-eabi-gcc` 13.2.1, Unicorn 2.1.4. Fault model:
-instruction skip, k in {1,2,3,4}, exhaustive over the full golden trace.
+Target: Cortex-M3, `arm-none-eabi-gcc` 15.3.1 (Arm GNU Toolchain 15.3.Rel1),
+Unicorn 2.1.4. Fault model: instruction skip, k in {1,2,3,4}, exhaustive over
+the full golden trace. (Earlier measurements in this project's history used
+13.2.1; the baseline vulnerable-build numbers drift with compiler version --
+see "Compiler sweep" -- the hardened numbers do not.)
 
 ## Secure boot: hardening works, and the call site was the whole story
 
@@ -16,16 +20,19 @@ Bypasses (single fault, exhaustive):
 
 | build | forged | rollback | bad_magic | golden len |
 |---|---|---|---|---|
-| base -O0 | 69 | 30 | 23 | 11,344 |
-| hardened -O0 | 4 | 4 | 4 | 23,745 |
-| base -O2 | 24 | 11 | 8 | 3,895 |
-| **hardened -O2** | **2** | **0** | **0** | 8,130 |
-| base -Os | 30 | 17 | 7 | 4,422 |
-| hardened -Os | 3 | 1 | 0 | 9,263 |
+| base -O0 | 62 | 23 | 16 | 11,344 |
+| **hardened -O0** | **0** | **0** | **0** | 23,745 |
+| base -O2 | 22 | 9 | 6 | 3,890 |
+| hardened -O2 | 2 | 0 | 0 | 8,119 |
+| base -Os | 24 | 8 | 4 | 4,311 |
+| hardened -Os | 2 | 0 | 0 | 9,103 |
 
-90-100% reduction in every cell. At `-O2` the rollback and bad-magic vectors are
-**fully closed**: no single instruction skip anywhere in an 8,130-instruction
-trace accepts a rolled-back or malformed image.
+**Every hardened cell except `-O2`/forged and `-Os`/forged is now fully
+closed** -- including `-O0`, which is not what the first version of this table
+said (see bug 5 below: the original `-O0` row was 4/4/4, entirely a
+classifier artifact). At `-O2` and `-Os`, rollback and bad-magic are fully
+closed: no single instruction skip anywhere in either trace accepts a
+rolled-back or malformed image.
 
 ### The finding that mattered
 
@@ -52,13 +59,27 @@ barely helped" (3 vs 4). Localisation is what turned it into an actionable fix.
 
 ## Compiler sweep
 
-Baseline, forged vector: **69 bypasses at -O0 vs 24 at -O2**. Unoptimised code
+Baseline, forged vector: **62 bypasses at -O0 vs 22 at -O2**. Unoptimised code
 spills and reloads everything, so there are far more individually-skippable
 instructions between a decision and its consequence. Debug builds are not just
-slower, they are a materially larger attack surface.
+slower, they are a materially larger attack surface. (These specific counts
+are compiler-version-sensitive -- see the note at the top of this document --
+but the *shape* of the result, -O0 substantially worse than -O2/-Os for the
+unhardened build, is not.)
 
-The hardened build inverts this: `-O0` is the *worst* hardened configuration
-(4/4/4) and `-O2` the best (2/0/0).
+**The hardened build does not invert this, and saying so was this project's
+biggest single mistake.** An earlier version of this document reported
+hardened `-O0` as 4/4/4, the *worst* hardened configuration, against `-O2`'s
+2/0/0 -- a clean, intuitive-sounding story (debug builds are worse, hardening
+can't fully fix that) that was completely wrong. Bug 5 below found hardened
+`-O0` is actually 0/0/0: fully closed, better than every other build in the
+matrix. All four of the original "4/4/4" bypasses were the same classifier
+artifact, and `-O0`'s 23,745-instruction trace (3x `-O2`'s) simply gave that
+artifact roughly 3x more instructions to spuriously land on. The lesson
+generalizes past this one bug: a result that produces a satisfying narrative
+is not thereby more likely to be correct, and "the numbers moved in the
+direction the story predicted" is exactly the condition under which a
+confident wrong number is least likely to get double-checked.
 
 ### The two `-O2` survivors: agreement is not validation
 
@@ -332,7 +353,7 @@ A safety oracle is a continuously re-evaluated invariant, and they barely move i
   callbacks. A `UC_HOOK_CODE` callback at ~1 us/instruction would make the
   32,520-run hardened campaign take ~4 minutes instead of ~7 seconds.
 
-## Four harness bugs, all silent
+## Five harness bugs, all silent
 
 This is the most useful section in the document.
 
@@ -399,13 +420,99 @@ gates rerun clean afterward with identical single-fault numbers throughout --
 this bug never touched any previously-reported single-fault result, since none
 of them are triggered at instruction 0.
 
-**The generalisable lesson: a fault injection harness must be adversarial about
-its own instrumentation, its own memory model, its own concurrency, and its
-own idea of "undefined."** All four bugs were silent, all four produced
-confident wrong numbers, and one of them pointed in the direction that would
-have gotten published. A fabricated bypass survives review much longer than a
-missing one -- and the fourth bug shows that lesson holds even at a scale of
-1-in-500, not just 6x.
+### 5. `marks` used as an accept signal, corruptible the same way verdict was (bug 1, again, in a place bug 1's fix didn't reach) -- LARGE INFLATED result, one withdrawn finding
+
+This is the big one. Found while chasing what looked like the most exciting
+result of the project: an order-3 (triple-fault) exhaustive search against
+`rollback` and `bad_magic` -- both exhaustively proven closed against one and
+two faults above -- found 96 and 36 "exploitable" triples respectively. The
+draft of this document briefly called that a genuine escalation: countermeasures
+holding at low fault order, giving way at three faults.
+
+**It wasn't real, and the way it fell apart is worth walking through.**
+`classify_boot()` computed `accepted = (verdict == V_BOOT_ACCEPT) or (marks &
+MARK_JUMP_TAKEN)`. Checking the `verdict` field on the "exploitable" triples
+before believing them: **zero of the 96 `bad_magic` results had `verdict ==
+V_BOOT_ACCEPT`.** All 96 had `verdict == 0` -- the run never reached *any*
+`oracle_halt()` call. All 36 `rollback` results had **`verdict ==
+V_BOOT_REJECT`** -- the firmware's own recorded verdict said reject, and the
+classifier called it a bypass anyway, purely from the marks bit.
+
+The mechanism: `oracle_mark()` compiles to a read-modify-write --
+`ldr r2,[r3,#8]` (load current marks), `orr.w r2,r2,#2` (OR in a bit),
+`str r2,[r3,#8]` (store back). A skip fault that removes the *load* leaves
+`r2` holding whatever it last held -- in the traced case, `(hdr->length - 1)
+XOR hdr->magic` from an unrelated, also-fault-disrupted CFI computation a few
+instructions earlier. That value happened to already have bit 4 set. OR in
+`HDR_OK`'s bit, store it back, and `marks & MARK_JUMP_TAKEN` reads true despite
+no `jump_to_app()` call anywhere in the execution -- confirmed by tracing the
+full instruction stream, which never leaves `verify_image_hardened` and
+`memcpy` before the instruction budget runs out.
+
+This is structurally bug 1 again -- corrupted telemetry with the right bit
+set, indistinguishable from a real finding unless checked -- in a spot bug 1's
+fix doesn't cover. `oracle_trustworthy()` checks "no undefined bits in
+`marks`," and a stale register holding real firmware data (a length, a magic
+value) easily falls entirely within the *defined* 9-bit range by chance,
+especially for small values. The check that caught bug 1's failure mode
+(implausibly large corrupted values, like a RAM address) has nothing to say
+about a small, plausible-looking one.
+
+**Why `verdict` doesn't have this exposure and `marks` does:** `verdict` is
+set by one direct store of a sparse, high-Hamming-distance constant (see
+`oracle.h`) -- no load, no accumulation, nothing stale to inherit. `marks` is
+an accumulator by design (see the design note in `oracle.h`: it exists so the
+harness can reconstruct a control-flow path without a full trace), and every
+accumulator has this load-bearing load. The `MARK_JUMP_TAKEN` OR-clause was
+presumably added to catch a fault that reaches the accept decision but
+disrupts the verdict *write* itself -- but `oracle_halt()` already guards
+that case with a trailing `for(;;){}` (see its comment: "guards against a
+skipped store"), which the harness sees as `HANG`, not a silent accept. The
+marks fallback was not just unsafe, it was unnecessary.
+
+**Fix:** `accepted = (verdict == V_BOOT_ACCEPT)`, full stop. Both gates rerun
+clean. Then came the expensive part -- checking whether this contaminated
+anything already reported:
+
+- The `-O2` two-survivor finding and the double-fault campaign (1,635
+  exploitable / 1,206 novel): **clean.** Replaying the two single-fault
+  survivors and all 1,207 novel double-fault triggers (across all four
+  possible widths for the untracked second fault) directly, every single one
+  has genuine `verdict == V_BOOT_ACCEPT`. Nothing in this document's
+  double-fault section needed to change.
+- **The regression baseline table did not survive.** A full matrix re-run
+  with the fix applied changed five of the six unhardened-vs-hardened cells
+  (new numbers are in the table at the top of this document and in
+  CLAUDE.md). The starkest: hardened `-O0` went from 4/4/4 to **0/0/0** --
+  see "Compiler sweep" above. `-O0`'s much longer trace gave the artifact
+  proportionally more chances to fire, which is exactly backwards from what
+  the original table implied (that debug builds are less securable even when
+  hardened).
+- **The triple-fault finding itself is withdrawn.** Whether `rollback` and
+  `bad_magic` are actually closed against three faults is, as of this
+  writing, unknown again -- a real open question, not a settled one, and it's
+  in "Next" below.
+
+**The generalisable lesson, again, sharper this time: fixing a silent-corruption
+bug once, in one place, does not mean the failure mode is gone.** Bug 1 and
+bug 5 are the *same* root cause -- a harness trusting a telemetry field
+without verifying it was produced by the code path it claims to represent --
+recurring in a second field with a different, more accumulator-shaped attack
+surface. The check that stops bug 1 from recurring verbatim (no undefined
+bits) does not generalize to stopping its sibling. And this one was caught
+only because a review discipline held under pressure: the result was the most
+exciting number in the whole project, arrived right when the work was
+already deep into a long session, and got checked against ground truth
+(`verdict`) before being written up as fact rather than after.
+
+**The generalisable lesson from all five, stated once: a fault injection
+harness must be adversarial about its own instrumentation, its own memory
+model, its own concurrency, and its own idea of "undefined" -- and "adversarial"
+has to be re-applied to every new telemetry field and every new fault order,
+not assumed to transfer from the last field or order it was applied to.** All
+five bugs were silent, all five produced confident wrong numbers, and two of
+them (1 and 5) pointed in the direction that would have gotten published. A
+fabricated bypass survives review far longer than a missing one.
 
 ## Threats to validity
 
@@ -443,10 +550,29 @@ missing one -- and the fourth bug shows that lesson holds even at a scale of
    `min_version`), where the signature check's C4 duplicates compare two
    *derived* values against each other. Divergent duplication is exactly as
    strong as what each duplicate validates against.
-3. GA search over the residual space, per the original roadmap -- now that
-   `slice.py` exists to seed it and the double-fault baseline above exists to
-   compare against.
-4. Independent watchdog model for the supervisor, per the fail-closed argument.
-5. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
-6. QEMU backend for cross-validation; disagreement between backends localises
+3. ~~**GA search**~~ — done, `harness/faultlab/ga.py`. Dynamic-slice-seeded
+   population, marks-progress fitness (partial credit toward the golden run's
+   checkpoint bits), tournament selection, crossover, mutation, and random
+   immigrants each generation against premature convergence. Validated by
+   rediscovering a real order-2 `forged`/hardened-`-O2` bypass from scratch in
+   9 generations. This is also the tool for the item below.
+4. **Redo the triple-fault search on `rollback`/`bad_magic`, for real this
+   time.** The order-3 exhaustive search that motivated bug 5 above is
+   withdrawn -- every one of its 132 results was the classifier artifact, not
+   a real bypass. Whether these two vectors survive three faults is an open
+   question again, not a settled one. `ga.py` can search order 3+ without the
+   millions-of-combinations cost of exhausting it, though for traces this
+   short (58/74 instructions) exhaustive order-3 is still cheap enough (a few
+   million combinations) to just rerun directly with the fixed classifier.
+5. **Audit `classify_supervisor()` for the same failure shape.** It reads
+   `marks & MARK_SAFE_ENTERED` too (`classify.py`) -- structurally the same
+   accumulator-read pattern bug 5 broke, though used in the opposite
+   direction (absence of the bit signals failure, not presence signaling
+   success), which means a coincidentally-corrupted mark here would cause a
+   false *negative* -- a missed safety violation -- rather than a false
+   positive. Not yet verified either way; flagging it rather than leaving it
+   silently unchecked is the whole point of bug 5's lesson.
+6. Independent watchdog model for the supervisor, per the fail-closed argument.
+7. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
+8. QEMU backend for cross-validation; disagreement between backends localises
    where the abstraction gap changes the security conclusion.

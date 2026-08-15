@@ -125,6 +125,28 @@ produced: 476 distinct early-fault trigger values that looked at first like
 476 different bugs and turned out to be one drift effect landing on the same
 ~14 addresses.
 
+**10. `accepted` in `classify_boot()` depends on `verdict` alone — never OR
+in a `marks` bit as an alternate accept signal.** It used to:
+`accepted = (verdict == V_BOOT_ACCEPT) or bool(marks & MARK_JUMP_TAKEN)`.
+`marks` is updated by a read-modify-write (`ldr` current value, `orr` in a
+bit, `str` back) — a skip fault that removes the *load* leaves a stale
+register from whatever ran earlier to be OR'd and stored instead, and that
+stale value can coincidentally have `MARK_JUMP_TAKEN`'s bit set while
+containing zero undefined bits, which is invisible to `oracle_trustworthy()`.
+Found via a triple-fault campaign against `rollback`/`bad_magic`: every one of
+132 "exploitable" results had `verdict != V_BOOT_ACCEPT` — `rollback`'s were
+`verdict == V_BOOT_REJECT` outright, the marks bit overriding an explicit,
+correct REJECT. `verdict` doesn't have this exposure: it's one direct store
+of a sparse constant, not an accumulator. This is bug 1's exact failure mode
+(corrupted telemetry with the right bit set, indistinguishable from a real
+finding unless checked) recurring in a field bug 1's fix — "no undefined bits
+in marks" — does not cover, because a stale but *plausible* small value can
+be entirely within the defined range. Fixing it changed the regression
+baseline table above significantly, especially `hardened -O0` (4/4/4 →
+0/0/0) — see RESULTS.md bug 5 for the full account, including why that
+table's original "-O0 is the worst hardened config" conclusion was itself
+downstream of this bug and had to be retracted.
+
 ## Architecture
 
 ```
@@ -156,20 +178,29 @@ writes inputs there pre-reset. No rebuild per vector.
 
 ## Regression baselines
 
-Known-good as of the last full run. If a change moves these, understand why
-before committing. Secure boot, single-fault skip k in {1,2,3,4}, exhaustive:
+Known-good as of the last full run: `arm-none-eabi-gcc` 15.3.1, with the
+invariant-10 classifier fix applied. **Both of those are load-bearing on these
+exact numbers** — a different compiler version moves the `base` column (see
+RESULTS.md's "Compiler sweep"), and invariant 10's fix moved literally every
+cell except `hardened -O2`/forged when it landed (`hardened -O0` in
+particular: 4/4/4 → 0/0/0). If a change moves these and you didn't just
+change compiler or fix a classifier bug, understand why before committing.
+Secure boot, single-fault skip k in {1,2,3,4}, exhaustive:
 
 | build | forged | rollback | bad_magic |
 |---|---|---|---|
-| base -O0 | 69 | 30 | 23 |
-| hardened -O0 | 4 | 4 | 4 |
-| base -O2 | 24 | 11 | 8 |
+| base -O0 | 62 | 23 | 16 |
+| hardened -O0 | 0 | 0 | 0 |
+| base -O2 | 22 | 9 | 6 |
 | hardened -O2 | 2 | 0 | 0 |
-| base -Os | 30 | 17 | 7 |
-| hardened -Os | 3 | 1 | 0 |
+| base -Os | 24 | 8 | 4 |
+| hardened -Os | 2 | 0 | 0 |
 
 Determinism gate reference: `secureboot-base-O2` / `forged` must give exactly
-**24** exploitable sites at every worker count.
+**22** exploitable sites at every worker count (compiler- and classifier-fix-
+dependent per the note above — the determinism *test* only checks
+cross-worker-count consistency, not this specific value; this number is
+documentation, not an assertion in the test itself).
 
 ## Open work, roughly in order
 
@@ -201,28 +232,48 @@ Determinism gate reference: `secureboot-base-O2` / `forged` must give exactly
    (streamed via `Pool.imap_unordered()` over a lazy combinations generator,
    not materialized — 96M `FaultSet` objects up front would have exhausted
    memory) and found **1,635 exploitable double-fault sets, 1,206 of them
-   novel** — not explained by either known single-fault survivor. The first,
-   smaller seeded pass (6,048 pairs, SDC near-misses ∩ slice) had concluded
-   there was nothing novel; it was seeded from the wrong region and missed the
-   real attack surface entirely. Characterizing *why* — the late fault is
-   always in the same 14-instruction window, the early fault ranges across
-   nearly the whole trace — is RESULTS.md's next item.
+   novel** — not explained by either known single-fault survivor, all
+   independently confirmed genuine (`verdict == V_BOOT_ACCEPT`) after bug 5
+   below raised the question of whether any "exploitable" count could be
+   trusted at all. The mechanism turned out to be instruction-count drift,
+   not a wide blind spot — see RESULTS.md and invariant 9 above.
 
    Finding this also surfaced a fourth silent harness bug (RESULTS.md,
-   "Four harness bugs" §4, and invariant 8 above): `reset()` left R0-R12/LR
+   "Five harness bugs" §4, and invariant 8 above): `reset()` left R0-R12/LR
    undefined, so `trigger=0` faults could read golden-trace leftover register
-   state instead of a defined reset value. Fixed; both gates rerun clean;
-   1 of 1,636 raw exploitable results was a pure artifact of it (now excluded
-   from the 1,635/1,206 figures above).
-4. **Independent watchdog model** for the supervisor. The current result says
+   state instead of a defined reset value. Fixed; both gates rerun clean.
+4. ~~**GA search**~~ — done, `harness/faultlab/ga.py`. Validated by
+   rediscovering a real order-2 bypass from scratch. Used to drive at a
+   genuinely new question (order-3 search on `rollback`/`bad_magic`) which is
+   how it surfaced invariant 10 above — the fifth harness bug, and the
+   largest correction this project has made: it retracted the "hardened -O0
+   is the worst configuration" conclusion (real answer: 0/0/0, best in the
+   matrix) and invalidated a from-scratch triple-fault "finding" that had
+   briefly looked like the most exciting result in the whole project. See
+   RESULTS.md bug 5 for the full account — it's the one worth reading if you
+   only read one section of that document.
+5. **Redo the triple-fault search on `rollback`/`bad_magic`** with the fixed
+   classifier — the original result is withdrawn, not negative. Real answer
+   unknown. RESULTS.md's traces are short enough (58/74 instructions) that
+   exhaustive order-3 is cheap; `ga.py` isn't even necessary for this one.
+6. **Audit `classify_supervisor()`** for bug 5's failure shape — it reads
+   `marks & MARK_SAFE_ENTERED` too, same accumulator pattern, opposite
+   direction (a coincidentally-corrupted mark here would cause a missed
+   safety violation, not a fabricated bypass). Not yet checked either way.
+7. **Independent watchdog model** for the supervisor. The current result says
    fail-closed is unachievable in software — model a watchdog that drives
    gate-driver enable low on timeout and show it closes the gap.
-5. **MicroBlaze port** — second architecture makes "architecture-independent" a
+8. **MicroBlaze port** — second architecture makes "architecture-independent" a
    claim rather than an aspiration. Also the detail that makes this project
    unmistakably the author's, since that is the soft core he ships on.
-6. **QEMU backend** for cross-validation. Agreement is a correctness argument;
+   Blocked on item 9: Unicorn has no MicroBlaze support (checked this
+   session — `UC_ARCH_*` lists ARM/ARM64/MIPS/PPC/RISCV/SPARC/X86/M68K/
+   S390X/TriCore, no MicroBlaze), so this needs the QEMU backend first, not
+   after, despite the original ordering below.
+9. **QEMU backend** for cross-validation. Agreement is a correctness argument;
    disagreement localises where the emulator abstraction changes the security
-   conclusion, which is itself a finding.
+   conclusion, which is itself a finding. Also the actual prerequisite for
+   item 8.
 
 ## Conventions
 

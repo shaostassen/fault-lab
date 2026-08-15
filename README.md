@@ -103,23 +103,31 @@ naming them is worth more than another heatmap.
 at 1,400-9,700 runs/s on 4 workers and find real single-fault bypasses.
 See RESULTS.md for measured numbers.
 
-Headline result: hardening cut secure-boot bypasses by 90-100% in every cell,
-and fully closed the rollback and bad-magic vectors at -O2. Getting there
-required finding that all residual bypasses were at the unprotected CALL SITE,
-not in the verifier -- aggregate counts would have missed it entirely.
+Headline result: hardening closes every secure-boot cell except `-O2` and
+`-Os`/forged (2 exploitable instructions each; `-O0` is fully closed, 0/0/0).
+Getting there required finding that the first version of the countermeasures'
+residual bypasses were at the unprotected CALL SITE, not in the verifier --
+aggregate counts would have missed it entirely.
 
-Three silent harness bugs were found and fixed along the way (inflated results,
-suppressed results, and nondeterminism). All are documented in RESULTS.md
-because the failure modes generalise past this project.
+Five silent harness bugs were found and fixed along the way -- inflated
+results, suppressed results, nondeterminism, an undefined-register artifact,
+and (the big one) a telemetry field that could be corrupted into looking like
+a real bypass, which briefly produced a fabricated "hardened `-O0` is the
+worst configuration" conclusion before being caught and retracted. All five
+are documented in RESULTS.md because the failure modes generalise past this
+project -- bug 5 especially, since it's the same root cause as bug 1
+recurring in a field bug 1's own fix didn't cover.
 
 Determinism is gated: `python3 harness/tests/test_determinism.py`.
 
-Backward taint slicing (`harness/faultlab/slice.py`) is built and narrows the
-multi-fault candidate set -- see CLAUDE.md Open work item 2 for numbers.
-
-Not yet built: double-fault campaigns against hardened `-O2` (slicing is the
-prerequisite, now done), GA search, QEMU backend, MicroBlaze port, watchdog
-model.
+Backward taint slicing (`harness/faultlab/slice.py`), double-fault campaigns
+against hardened `-O2` (full 95.9M-pair search, not just a seeded sample --
+see RESULTS.md), and a GA multi-fault search (`harness/faultlab/ga.py`) are
+all built. See CLAUDE.md's Open work list for current numbers and what's next
+-- as of this writing, that's redoing the triple-fault search bug 5
+invalidated, auditing the supervisor classifier for the same failure shape,
+then the watchdog model, QEMU backend, and MicroBlaze port (in that order --
+Unicorn has no MicroBlaze support, so QEMU is the real prerequisite).
 
 ## Quickstart
 

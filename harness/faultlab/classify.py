@@ -62,7 +62,25 @@ def classify_boot(res: RunResult, vec: BootVector, golden: RunResult) -> Outcome
     if not oracle_trustworthy(o):
         return Outcome.CRASH
 
-    accepted = (o.verdict == V_BOOT_ACCEPT) or bool(o.marks & MARK_JUMP_TAKEN)
+    # `marks` used to be OR'd in here too (accepted if EITHER verdict said so
+    # OR the JUMP_TAKEN bit was set), meant to catch a fault that reaches the
+    # accept decision but disrupts the verdict write itself. It doesn't work:
+    # marks is a read-modify-write accumulator (load current marks, OR in a
+    # bit, store back), and a fault that skips the LOAD leaves a stale
+    # register -- holding unrelated data from whatever ran before -- to be
+    # OR'd and stored in its place. That stale value can coincidentally have
+    # bit 4 set with no undefined bits elsewhere, which is indistinguishable
+    # from a real MARK_JUMP_TAKEN to oracle_trustworthy(). Found via a
+    # triple-fault campaign against rollback/bad_magic: every one of 96+36
+    # "exploitable" results had verdict != V_BOOT_ACCEPT -- rollback's were
+    # verdict == V_BOOT_REJECT outright, the marks bit overriding an explicit,
+    # correctly-recorded REJECT. verdict doesn't have this exposure: it's a
+    # single direct store of a sparse, high-Hamming-distance constant (see
+    # oracle.h), not an accumulator, so there's no stale-load path into it.
+    # And if a fault skips the verdict WRITE itself, oracle_halt()'s trailing
+    # `for(;;){}` traps execution -- caught as HANG, not silently accepted --
+    # so marks was never actually needed as a fallback for that case.
+    accepted = (o.verdict == V_BOOT_ACCEPT)
 
     # --- adversarial checks first ------------------------------------------
     if accepted and not vec.should_accept:
