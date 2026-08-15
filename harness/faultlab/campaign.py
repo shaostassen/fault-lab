@@ -169,3 +169,48 @@ def run_campaign(build_dir: str, vec, kind: str, fault_sets: list,
             rows = p.map(_run_one, fault_sets, chunksize=chunksize)
     el = time.perf_counter() - t0
     return CampaignResult(rows, glen, el, len(fault_sets) / el if el else 0.0)
+
+
+@dataclass(slots=True)
+class StreamingCampaignResult:
+    """Same shape of answer as CampaignResult, for a candidate set too large to
+    materialize. Keeps only aggregate counts and the exploitable rows, not
+    every row -- see run_campaign_streaming()."""
+    total: int
+    counts: dict
+    exploitable: list
+    golden_length: int
+    elapsed: float
+    rate: float
+
+
+def run_campaign_streaming(build_dir: str, vec, kind: str, fault_sets_iter,
+                           workers: int = None, rungs: int = 16,
+                           chunksize: int = 2000) -> StreamingCampaignResult:
+    """Like run_campaign(), but drives Pool.imap_unordered() over a lazily
+    consumed iterable instead of collecting every Row into a list.
+
+    run_campaign() holds the full input list AND the full output list in
+    memory at once, which is fine at thousands of fault sets and is not fine
+    at tens of millions -- multi_fault_from_candidates() on a few thousand
+    slice.py candidates already produces that many pairs. Pass a generator
+    (e.g. combinations() filtered by min_separation, built the same way
+    multi_fault_from_candidates() does internally but never materialized) and
+    memory stays flat regardless of how many pairs run, because only the
+    exploitable rows are kept in full."""
+    glen, _, _ = golden_length(build_dir, vec)
+    workers = workers or os.cpu_count() or 1
+    t0 = time.perf_counter()
+    counts = {o.name: 0 for o in Outcome}
+    exploitable: list[Row] = []
+    total = 0
+    with _CTX.Pool(workers, initializer=_init_worker,
+                   initargs=(build_dir, vec, kind, glen, rungs)) as p:
+        for row in p.imap_unordered(_run_one, fault_sets_iter, chunksize=chunksize):
+            total += 1
+            counts[Outcome(row.outcome).name] += 1
+            if row.outcome in (Outcome.SEC_BYPASS, Outcome.SAFETY_VIOLATION):
+                exploitable.append(row)
+    el = time.perf_counter() - t0
+    return StreamingCampaignResult(total, counts, exploitable, glen, el,
+                                   total / el if el else 0.0)

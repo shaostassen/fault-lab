@@ -36,7 +36,7 @@ from unicorn import (
     UC_HOOK_CODE, UC_HOOK_MEM_WRITE, UC_PROT_ALL,
     UC_PROT_READ, UC_PROT_EXEC, UC_PROT_WRITE, UcError,
 )
-from unicorn.arm_const import UC_ARM_REG_PC, UC_ARM_REG_SP, UC_ARM_REG_R0
+from unicorn.arm_const import UC_ARM_REG_PC, UC_ARM_REG_SP, UC_ARM_REG_R0, UC_ARM_REG_LR
 
 from ..faults import FaultModel, FaultSet
 from ..target import (
@@ -137,6 +137,22 @@ class UnicornBackend:
             self.uc.mem_write(addr, data)
         self.uc.reg_write(UC_ARM_REG_SP, self.target.initial_sp)
         self.uc.reg_write(UC_ARM_REG_PC, self.target.entry | 1)
+        # R0-R12 and LR are DEFINED zero, not left whatever they were. Real
+        # Cortex-M3 silicon leaves these architecturally undefined on reset,
+        # but "undefined" must mean one deliberate, documented value here, not
+        # an accident of call order. _init_worker() calls trace() (a full,
+        # unfaulted golden run) before build_ladder() snapshots rung 0 -- if
+        # this loop is skipped, rung 0 inherits whatever registers the golden
+        # run's FINAL instructions happened to leave behind, not a clean reset
+        # state. A trigger=0 fault that skips Reset_Handler's first register
+        # load then reads that leftover value instead: found via a trigger=0
+        # skip reading golden-trace-tail garbage into r2 and changing how the
+        # .data copy loop behaved, producing a SEC_BYPASS that a second,
+        # independent run with genuinely undefined (zeroed) registers does
+        # not reproduce.
+        for r in range(UC_ARM_REG_R0, UC_ARM_REG_R0 + 13):  # R0..R12
+            self.uc.reg_write(r, 0)
+        self.uc.reg_write(UC_ARM_REG_LR, 0)
         self._halted = False
         self._marks = []
         self._instr = 0

@@ -92,6 +92,20 @@ exactly N instructions with zero Python callbacks. A per-instruction hook costs
 ~1 us and would turn a 7-second campaign into 4 minutes. The code hook exists
 only in `trace()`, which runs once per (target, vector).
 
+**8. `reset()` defines every general-purpose register, not just SP/PC.**
+`UnicornBackend.reset()` used to leave R0-R12 and LR untouched. `_init_worker()`
+calls `trace()` (a full, unfaulted golden run) before `build_ladder()` snapshots
+rung 0 — with R0-R12 undefined by `reset()`, rung 0 silently inherited whatever
+registers the golden run's *last* instructions happened to leave behind, not a
+clean reset state. A `trigger=0` fault that skips Reset_Handler's first
+register load then read that leftover value instead of anything a real CPU
+reset would produce. Found via the double-fault campaign in RESULTS.md: of
+1,636 exploitable double-fault pairs, exactly 3 had `trigger=0`, and one of
+those three stopped reproducing once R0-R12/LR were zeroed explicitly — a real,
+if narrow, instance of the same silent-self-corruption pattern as bugs 1-3
+above. `reset()` now zeroes R0-R12 and LR explicitly so "undefined" is a
+documented choice, not an accident of call order.
+
 ## Architecture
 
 ```
@@ -161,16 +175,26 @@ Determinism gate reference: `secureboot-base-O2` / `forged` must give exactly
    the slice. Still coarse — dataflow through `memcmp_ct`'s byte-compare loop
    legitimately pulls in every byte, since the constant-time compare's result
    really does depend on all of them — so this narrows, it does not minimize.
-3. ~~**Double-fault campaigns**~~ — partially done, see RESULTS.md
-   ("Double-fault campaigns against hardened -O2"). `rollback` and `bad_magic`
-   are **exhaustively confirmed closed** against two faults (26,448 and 43,216
-   pairs, 0 exploitable — these traces are short enough to brute-force fully,
-   no slicing needed). `forged` got a bounded 6,048-pair search seeded from
-   SDC near-misses ∩ the item-2 slice, unioned with the two known survivors:
-   0 novel double-fault-only bypasses, but every one of the 22 exploitable
-   pairs found just combines a known survivor with an inert second fault —
-   this covers a small fraction of the ~96M-pair full slice space, not all of
-   it. Full-space search on `forged` is RESULTS.md's next item.
+3. ~~**Double-fault campaigns**~~ — done, see RESULTS.md ("Double-fault
+   campaigns against hardened -O2"). `rollback` and `bad_magic` are
+   **exhaustively confirmed closed** against two faults (26,448 and 43,216
+   pairs, 0 exploitable). `forged`'s full 95.9M-pair slice space was searched
+   (streamed via `Pool.imap_unordered()` over a lazy combinations generator,
+   not materialized — 96M `FaultSet` objects up front would have exhausted
+   memory) and found **1,635 exploitable double-fault sets, 1,206 of them
+   novel** — not explained by either known single-fault survivor. The first,
+   smaller seeded pass (6,048 pairs, SDC near-misses ∩ slice) had concluded
+   there was nothing novel; it was seeded from the wrong region and missed the
+   real attack surface entirely. Characterizing *why* — the late fault is
+   always in the same 14-instruction window, the early fault ranges across
+   nearly the whole trace — is RESULTS.md's next item.
+
+   Finding this also surfaced a fourth silent harness bug (RESULTS.md,
+   "Four harness bugs" §4, and invariant 8 above): `reset()` left R0-R12/LR
+   undefined, so `trigger=0` faults could read golden-trace leftover register
+   state instead of a defined reset value. Fixed; both gates rerun clean;
+   1 of 1,636 raw exploitable results was a pure artifact of it (now excluded
+   from the 1,635/1,206 figures above).
 4. **Independent watchdog model** for the supervisor. The current result says
    fail-closed is unachievable in software — model a watchdog that drives
    gate-driver enable low on timeout and show it closes the gap.

@@ -157,37 +157,71 @@ how thin these traces are, an attacker capable of two independent glitches has
 essentially the whole golden run available and still can't reopen either
 vector at `-O2`.
 
-### `forged`: no novel double-fault-only bypass found, in the region searched
+### `forged`: the seeded search was wrong. There is a novel attack surface, and it's large.
 
 `forged`'s golden trace is 8,119 instructions -- too long to search
-exhaustively at order 2 (the full slice-narrowed candidate set is 3,462
-triggers x 4 widths = 13,848 descriptors, C(13848,2) ~= 96M pairs, not run
-here). The question worth asking with a bounded search is narrower: is there a
-double-fault bypass where **neither fault alone would work**, i.e. a real
-combination effect distinct from "one of the two known single-fault survivors
-plus an inert second fault somewhere else"?
+exhaustively at order 2 by materializing every pair up front (the full
+slice-narrowed candidate set is 3,462 triggers x 4 widths = 13,848
+descriptors, C(13848,2) ~= 95.9M pairs -- 96M `FaultSet` objects would exhaust
+memory before any run happened). A first pass tried a bounded, seeded search
+instead: 6,048 pairs drawn from SDC near-misses intersected with the slice,
+plus the two known survivors. It found 22 exploitable sets, every one
+containing a known survivor, and concluded there was no novel combination
+effect *in that seed set*. That conclusion was correctly scoped at the time --
+but the seed set turned out to be the wrong place to look.
 
-Seed set: the 33 distinct trigger points with an `SDC` outcome in the
-single-fault sweep, intersected with the `slice.py` candidate set (26), unioned
-with the two known survivor triggers (8105, 8106) -- 28 unique triggers, 112
-fault descriptors across widths, 6,048 double-fault pairs from combining that
-seed set with itself.
+**Full-space search**, driven with `Pool.imap_unordered()` over a lazy
+`itertools.combinations()` generator instead of a materialized list -- the
+same 96M pairs, streamed one at a time so memory stays flat regardless of
+total count, with only exploitable rows and running counts kept (see
+`harness/faultlab/slice.py`-adjacent driving code, not yet folded into
+`campaign.py` proper):
 
-- 22 exploitable double-fault sets found.
-- **All 22 contain trigger 8105 or 8106** -- every one is a known single-fault
-  survivor paired with a second fault that doesn't interfere with it, not a
-  new combination effect.
-- 0 exploitable sets found that don't contain a known survivor.
+| | |
+|---|---|
+| pairs run | 95,855,856 |
+| wall time | 44.9 min (35,613 runs/s, 4 workers) |
+| OK / CRASH / SDC / HANG | 86,883,270 / 6,402,215 / 954,845 / 1,613,890 |
+| **exploitable** | **1,635** (0.0017% of pairs; corrected for the R0-R12 fix above) |
+| -- contain a known single-fault survivor (8105 or 8106) | 429 |
+| -- **novel: contain neither** | **1,206** |
 
-**This is not "hardened `-O2`/forged is closed against a genuinely novel
-double fault."** It is "no novel double-fault-only bypass turned up in a
-6,048-pair search seeded from SDC near-misses intersected with the slice."
-The other ~99.994% of the 96M-pair full space (any pair drawn from the full
-3,462-candidate slice, not touching an SDC near-miss or a known survivor) is
-unsearched. Given SDC outcomes are specifically the runs that already diverge
-from golden behaviour without reaching a verdict -- the textbook near-miss
-signal for multi-fault seeding -- this was the highest-yield region to check
-first, not a substitute for the full search.
+**74% of exploitable double-fault sets are novel.** The 6,048-pair seeded
+search from the first pass found zero of them, because it seeded from SDC
+near-misses -- runs that diverge from golden behaviour -- and this attack
+surface isn't made of near-misses. It's made of faults that, alone, produce
+perfectly ordinary `OK` (correctly-rejected) outcomes.
+
+**The structure, once you have the full set:** every novel bypass is a pair of
+one "early" fault and one "late" fault, and the two halves behave completely
+differently.
+
+- The **late** fault is always in a 14-instruction window, triggers 8102-8115
+  -- exactly the `cmp_a`/`cmp_b` check region identified above as the
+  structural blind spot for the single-fault survivors. This is the only place
+  in `verify_image_hardened` where the accept/reject decision actually gets
+  committed, so any bypass, single- or double-fault, has to land there.
+- The **early** fault ranges across essentially the *entire* trace -- 476
+  distinct trigger values from 0 (the very first instruction executed, before
+  `main` even runs) to 8104. It doesn't need to be surgically placed near the
+  decision at all.
+
+Read together: the late-window fault *alone* is not quite sufficient to force
+acceptance (that's why it didn't show up in the single-fault sweep), but it's
+close -- and almost any sufficiently early, independent disruption is enough
+to tip it over. This is a materially different, and materially larger, finding
+than "two known survivors plus an inert second fault." It says the late-window
+blind spot has more give in it than the single-fault result suggested: it's
+not two exact instruction/width pairs, it's a wide basin, and a broad range of
+otherwise-unrelated early corruption is enough to push a run into it.
+
+Not yet done: characterizing *why* early corruption widens the late-window
+blind spot (which register or memory value is the actual dependency -- a
+proper backward slice from the 8102-8115 window specifically, rather than from
+the oracle verdict, would answer this directly) and whether the same structure
+exists in `rollback`/`bad_magic` (their exhaustive 0/0 result above rules out
+*this specific* mechanism reopening them, but doesn't explain why forged's
+decision has give and theirs apparently doesn't).
 
 ## Safety supervisor: software hardening does not close this
 
@@ -233,7 +267,7 @@ A safety oracle is a continuously re-evaluated invariant, and they barely move i
   callbacks. A `UC_HOOK_CODE` callback at ~1 us/instruction would make the
   32,520-run hardened campaign take ~4 minutes instead of ~7 seconds.
 
-## Three harness bugs, all silent
+## Four harness bugs, all silent
 
 This is the most useful section in the document.
 
@@ -272,11 +306,41 @@ into every child, and merely having executed `import unicorn` in the parent is
 enough. Fixed with `mp.get_context("spawn")` plus keeping the parent
 emulator-free by running the golden trace in a throwaway child.
 
+### 4. `reset()` left R0-R12/LR undefined by call-order accident (small INFLATED result)
+
+Found by the double-fault campaign below, not by inspection. `reset()` only
+ever wrote SP and PC explicitly. `_init_worker()` calls `trace()` -- a full,
+unfaulted golden run -- *before* `build_ladder()` calls `reset()` again and
+snapshots rung 0. Since `reset()` never touched R0-R12/LR, rung 0 silently
+inherited whatever those registers held at the *end* of the golden trace, not
+a clean reset state. Real Cortex-M3 silicon does leave R0-R12 architecturally
+undefined after reset, but "undefined" has to mean one deliberate, documented
+value, not an accident of which function happened to run last.
+
+Impact was narrow, not sweeping: real code overwrites every register within
+the first few instructions, so only a fault triggered at instruction 0
+exactly -- skipping Reset_Handler's very first register load -- could read the
+contaminated value before anything legitimate overwrote it. Of the 1,636
+exploitable double-fault results found below, exactly 3 had `trigger=0`. Under
+a rerun with R0-R12/LR explicitly zeroed, one of those three stopped
+reproducing -- a `SEC_BYPASS` that existed only because of leftover
+golden-trace register state, not because of anything an attacker could cause.
+The other two survived the fix unchanged, confirming they're real. Corrected
+totals: **1,635 exploitable, 1,206 novel** (both figures below already
+reflect the fix).
+
+Fix: `reset()` now explicitly zeroes R0-R12 and LR. Determinism and regression
+gates rerun clean afterward with identical single-fault numbers throughout --
+this bug never touched any previously-reported single-fault result, since none
+of them are triggered at instruction 0.
+
 **The generalisable lesson: a fault injection harness must be adversarial about
-its own instrumentation, its own memory model, and its own concurrency.** All
-three bugs were silent, all three produced confident wrong numbers, and one of
-them pointed in the direction that would have gotten published. A fabricated
-bypass survives review much longer than a missing one.
+its own instrumentation, its own memory model, its own concurrency, and its
+own idea of "undefined."** All four bugs were silent, all four produced
+confident wrong numbers, and one of them pointed in the direction that would
+have gotten published. A fabricated bypass survives review much longer than a
+missing one -- and the fourth bug shows that lesson holds even at a scale of
+1-in-500, not just 6x.
 
 ## Threats to validity
 
@@ -294,17 +358,23 @@ bypass survives review much longer than a missing one.
 
 ## Next
 
-1. **Full-space double-fault search on `forged`/hardened-`-O2`.** The seeded
-   6,048-pair search above found no novel double-fault-only bypass, but it
-   covered a small fraction of the ~96M-pair full slice space. Worth running
-   to completion (est. ~50 min at the throughput measured here) or, better,
-   worth narrowing further first -- e.g. a second slice pass seeded on the
-   two known survivors' *data* dependencies specifically, not just SDC
-   near-misses, to shrink the space before brute-forcing it.
-2. GA search over the residual space, per the original roadmap -- now that
+1. **Characterize the early-fault mechanism.** 1,206 novel double-fault
+   bypasses share a 14-instruction late window (8102-8115) but a 476-value-wide
+   early range (0-8104). Run a backward slice seeded from the 8102-8115 window
+   itself (not from the oracle verdict) to find what memory/register value
+   actually carries the "give" from an early fault forward to the late check --
+   that's the difference between "a wide, shallow blind spot" and "476
+   independent bugs that happen to share a landing zone," and only one of
+   those is actionable to fix.
+2. **Explain the asymmetry with `rollback`/`bad_magic`.** Those two are
+   exhaustively closed against the identical double-fault search (0/95.9M
+   scaled down). Either their equivalent decision window has no early-fault
+   dependency, or it does and the search there (58/74-instruction traces) was
+   too short to expose it -- worth confirming which.
+3. GA search over the residual space, per the original roadmap -- now that
    `slice.py` exists to seed it and the double-fault baseline above exists to
    compare against.
-3. Independent watchdog model for the supervisor, per the fail-closed argument.
-4. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
-5. QEMU backend for cross-validation; disagreement between backends localises
+4. Independent watchdog model for the supervisor, per the fail-closed argument.
+5. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
+6. QEMU backend for cross-validation; disagreement between backends localises
    where the abstraction gap changes the security conclusion.

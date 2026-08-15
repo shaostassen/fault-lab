@@ -105,6 +105,29 @@ def single_fault_sweep(
     return out
 
 
+def multi_fault_stream_from_candidates(
+    candidates: Sequence[Fault],
+    order: int = 2,
+    min_separation: int = 1,
+):
+    """Generator version of multi_fault_from_candidates() -- yields one
+    FaultSet at a time instead of building the full list.
+
+    Still narrow the candidates first; this doesn't change the combinatorics,
+    it just stops the *combination list itself* from being the thing that runs
+    out of memory. A few thousand slice.py candidates already produce tens of
+    millions of order-2 pairs -- materializing that many FaultSet objects
+    before running any of them is its own way to exhaust memory, separate from
+    and in addition to the |trace|^2 problem this function's sibling warns
+    about. Feed this to campaign.py's run_campaign_streaming(), which consumes
+    it lazily via Pool.imap_unordered() and never holds the full set either.
+    """
+    for combo in itertools.combinations(candidates, order):
+        trigs = sorted(f.trigger for f in combo)
+        if all(b - a >= min_separation for a, b in zip(trigs, trigs[1:])):
+            yield FaultSet(tuple(combo))
+
+
 def multi_fault_from_candidates(
     candidates: Sequence[Fault],
     order: int = 2,
@@ -120,13 +143,12 @@ def multi_fault_from_candidates(
     min_separation rejects tuples too close together in time to be physically
     realisable by a real glitcher, which keeps the search honest about what an
     attacker can actually do.
+
+    This materializes the full combination list, which is itself a memory
+    problem once the candidate set gets into the thousands -- see
+    multi_fault_stream_from_candidates() for a generator that doesn't.
     """
-    out: list[FaultSet] = []
-    for combo in itertools.combinations(candidates, order):
-        trigs = sorted(f.trigger for f in combo)
-        if all(b - a >= min_separation for a, b in zip(trigs, trigs[1:])):
-            out.append(FaultSet(tuple(combo)))
-    return out
+    return list(multi_fault_stream_from_candidates(candidates, order, min_separation))
 
 
 def dedupe(sets: Sequence[FaultSet]) -> list[FaultSet]:
