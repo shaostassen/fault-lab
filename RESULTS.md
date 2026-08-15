@@ -250,13 +250,43 @@ mount; the double-fault result (~14 landing points, reachable through a wide
 range of timing-error-absorbing early faults) is the more operationally
 honest number.**
 
-Still open: whether `rollback`/`bad_magic`'s equivalent decision points have
-the same timing-drift tolerance. Their exhaustive 0/0 result rules out this
-mechanism reopening *them*, but that could mean their decision points are
-genuinely point-like (no nearby offset/width combination works) rather than
-merely "not reached by this search" -- worth confirming which, since it
-changes whether "closed" is a property of those checks or an artifact of
-their traces being too short for a drift effect to have room to matter.
+### Why `rollback`/`bad_magic` don't have this problem
+
+Their 0/0 result isn't an artifact of insufficient search depth. The
+candidate generation already covers this: an exhaustive double-fault search
+over "every nominal (early, late) trigger pair, all four widths" necessarily
+also covers "every true landing position `late + early_width`," since the
+early fault's width was varied across the same 1-4 range independently of
+which late trigger it was paired with. The `t + w0` drift-shift the `forged`
+analysis above depends on was already being exercised, exhaustively, by the
+same 26,448- and 43,216-pair searches reported earlier -- there's no
+undiscovered mechanism these searches were too short to reach.
+
+The real reason is structural, and it's visible directly in the source. C2's
+divergent-duplication pattern is applied to `bad_magic` and `rollback` as two
+independent re-tests against a **real constant**:
+
+```c
+if (hdr->magic != IMAGE_MAGIC)    return VERIFY_FAIL;
+if (!(hdr->magic == IMAGE_MAGIC)) return VERIFY_FAIL;
+...
+if (hdr->version < min_version)     return VERIFY_FAIL;
+if (!(hdr->version >= min_version)) return VERIFY_FAIL;
+```
+
+Both forms of each check compare directly against `IMAGE_MAGIC` /
+`min_version` -- an attacker has to defeat two genuinely independent
+comparisons against ground truth. Compare that to C4's signature check (the
+`-O2` survivor section above): `cmp_a != cmp_b` and `memcmp_ct(d1, d2, 32)`
+don't compare against a constant at all, they compare two *derived* values
+against **each other**. For a forged image with an unfaulted hash
+computation, those two derived values agree by construction, so the
+agreement checks add no defense against skipping the checks that matter. The
+double-fault campaign's structural finding, stated once and for all: **C2
+divergent duplication is exactly as strong as what each duplicate compares
+against.** Against a real constant, it holds under both single- and
+double-fault search. Against a second, correctly-computed but
+un-independently-validated value, it doesn't.
 
 ## Safety supervisor: software hardening does not close this
 
@@ -405,14 +435,14 @@ missing one -- and the fourth bug shows that lesson holds even at a scale of
    physically realistic model of timing drift after a real glitch, and the
    finding is that the vulnerable check block tolerates that drift over a wide
    range rather than requiring exact timing.
-2. **Explain the asymmetry with `rollback`/`bad_magic`.** Those two are
-   exhaustively closed against the identical double-fault search (0/95.9M
-   scaled down). Given the drift mechanism above, the open question is
-   sharper than before: do their decision points have no nearby
-   offset/width that works (genuinely point-like), or did their much shorter
-   traces (58/74 vs 8,119 instructions) just not give a drift effect room to
-   land anywhere -- worth confirming which, since only one of those is a
-   claim about the countermeasure and the other is a claim about the test.
+2. ~~**Explain the asymmetry with `rollback`/`bad_magic`.**~~ — done, see
+   RESULTS.md ("Why `rollback`/`bad_magic` don't have this problem"). Not a
+   search-depth gap -- the earlier exhaustive search already exercised every
+   true landing position the drift mechanism can reach. It's structural: their
+   C2 duplicate checks compare directly against a real constant (`IMAGE_MAGIC`,
+   `min_version`), where the signature check's C4 duplicates compare two
+   *derived* values against each other. Divergent duplication is exactly as
+   strong as what each duplicate validates against.
 3. GA search over the residual space, per the original roadmap -- now that
    `slice.py` exists to seed it and the double-fault baseline above exists to
    compare against.
