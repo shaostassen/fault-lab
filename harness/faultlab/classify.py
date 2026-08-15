@@ -17,7 +17,7 @@ from __future__ import annotations
 from .faults import Outcome
 from .target import (
     OracleState, V_BOOT_ACCEPT, V_BOOT_REJECT, V_SAFE_STATE,
-    V_RUN_COMPLETE, V_ASSERT_FAIL, BootVector, SupervisorVector,
+    V_RUN_COMPLETE, V_ASSERT_FAIL, BootVector, SupervisorVector, SUP_SAFE,
 )
 from .backend.unicorn_backend import HaltReason, RunResult
 
@@ -122,8 +122,22 @@ def classify_supervisor(res: RunResult, vec: SupervisorVector,
     #     fault_asserted => sup_state == SAFE and pwm_duty == 0
     # Checked against the vector's ground truth, not the firmware's opinion of
     # whether it noticed the fault.
+    #
+    # Uses sup_state, not `marks & MARK_SAFE_ENTERED` -- this used to be the
+    # marks bit, and it has bug 5's exact exposure (RESULTS.md): oracle_mark()
+    # is a read-modify-write, so a fault that skips the load can write a stale
+    # register into marks instead. Audited after bug 5 and confirmed broken in
+    # BOTH directions here, empirically: single-fault sweeps found dozens of
+    # runs per build/vector where the mark disagreed with sup_state -- some
+    # with marks claiming SAFE_ENTERED while sup_state was still SUP_INIT (or
+    # outright wild-pointer garbage, e.g. an MMIO address), which would have
+    # masked a real SAFETY_VIOLATION; others with sup_state correctly reading
+    # SUP_SAFE while the mark bit was simply never set, which would have
+    # fabricated one. sup_state doesn't have this exposure for the same reason
+    # verdict doesn't: every assignment in safety.c is a direct store of a
+    # sparse constant (0x11/0x22/0x44/0x88), never a load-modify-store.
     if vec.fault_asserted:
-        entered_safe = bool(o.marks & MARK_SAFE_ENTERED)
+        entered_safe = (o.sup_state == SUP_SAFE)
         if not entered_safe or o.pwm_duty != 0:
             return Outcome.SAFETY_VIOLATION
 

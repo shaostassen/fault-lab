@@ -39,6 +39,14 @@ V_SAFE_STATE = 0x0000C33C
 V_RUN_COMPLETE = 0x00003CC3
 V_ASSERT_FAIL = 0x0000FFF0
 
+# sup_state_t (mirrors supervisor/safety.c). Direct-store field like the
+# verdicts above, not an accumulator -- see classify.py's use of it instead
+# of the marks-based MARK_SAFE_ENTERED bit.
+SUP_INIT = 0x11
+SUP_ARMED = 0x22
+SUP_RUNNING = 0x44
+SUP_SAFE = 0x88
+
 MARK_NAMES = {
     0: "BOOT_ENTER", 1: "HDR_OK", 2: "VERSION_OK", 3: "SIG_OK", 4: "JUMP_TAKEN",
     5: "SUP_ARMED", 6: "SUP_RUNNING", 7: "FAULT_ASSERTED", 8: "SAFE_ENTERED",

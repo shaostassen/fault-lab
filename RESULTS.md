@@ -1,9 +1,9 @@
 # Campaign results
 
 All numbers below are measured output from `python -m faultlab.cli matrix`,
-regenerated after five harness bugs were found and fixed (documented below —
-all five silently corrupted results, mostly in the direction of inflating
-findings that weren't real).
+regenerated after six harness bugs were found and fixed (documented below —
+all six silently corrupted results, in both directions: inflating findings
+that weren't real, and, in bug 6's case, also masking real ones).
 
 Determinism is gated by `harness/tests/test_determinism.py`: same binary, same
 fault set, worker counts 1/2/4/8, identical exploitable sets required.
@@ -311,16 +311,23 @@ un-independently-validated value, it doesn't.
 
 ## Safety supervisor: software hardening does not close this
 
-| build | overcurrent | deadline_miss | runs | golden |
-|---|---|---|---|---|
-| base -O2 | 61 | 61 | 212/224 | 53/56 |
-| hardened -O2 | 115 | 117 | 436/460 | 109/115 |
-| base -O0 | 130 | 131 | 508/524 | 127/131 |
-| hardened -O0 | 195 | 191 | 1124/1160 | 281/290 |
+| build | overcurrent | deadline_miss | runs | golden | rate |
+|---|---|---|---|---|---|
+| base -O2 | 71 | 68 | 212/224 | 53/56 | 31.9% |
+| hardened -O2 | 118 | 120 | 432/456 | 108/114 | 26.8% |
+| base -O0 | 125 | 126 | 508/524 | 127/131 | 24.3% |
+| hardened -O0 | 188 | 190 | 1124/1160 | 281/290 | 16.5% |
+
+(Corrected for bug 6 below -- `classify_supervisor()` had the same
+marks-accumulator exposure bug 5 found in the boot classifier, confirmed by
+direct audit, not by inference from the boot fix. The correction moves every
+cell, in both directions -- see bug 6 -- but the qualitative shape survives
+unchanged: hardening only marginally reduces the violation rate, and the
+`-O2`/`-O0` comparison stays in the same order.)
 
 Raw counts went **up** with hardening. They are not comparable across builds: the
 hardened trace is roughly 2x longer, so there are 2x more injection sites.
-Normalised to violation rate per run, `-O2` goes 28.8% -> 26.4%. Marginal.
+Normalised to violation rate per run, `-O2` goes 31.9% -> 26.8%. Marginal.
 
 That marginal result is the finding, and it is not a failure of the
 countermeasures. The classifier checks the safety invariant *before* it checks
@@ -353,7 +360,7 @@ A safety oracle is a continuously re-evaluated invariant, and they barely move i
   callbacks. A `UC_HOOK_CODE` callback at ~1 us/instruction would make the
   32,520-run hardened campaign take ~4 minutes instead of ~7 seconds.
 
-## Five harness bugs, all silent
+## Six harness bugs, all silent
 
 This is the most useful section in the document.
 
@@ -505,14 +512,65 @@ exciting number in the whole project, arrived right when the work was
 already deep into a long session, and got checked against ground truth
 (`verdict`) before being written up as fact rather than after.
 
-**The generalisable lesson from all five, stated once: a fault injection
+### 6. Same bug as 5, in the supervisor classifier -- confirmed by audit, not assumed
+
+Bug 5's writeup ended with an item in CLAUDE.md's Open work list: audit
+`classify_supervisor()`, which reads `marks & MARK_SAFE_ENTERED` in
+structurally the same way `classify_boot()` read `marks & MARK_JUMP_TAKEN`,
+for the same reason (a read-modify-write accumulator, corruptible by a fault
+that skips the load). That audit is what this is -- not an inference from
+bug 5, an independent empirical check.
+
+Method: for every single-fault run across all four supervisor builds and both
+`fault_asserted` vectors (`overcurrent`, `deadline_miss`), compare `marks &
+MARK_SAFE_ENTERED` against `sup_state == SUP_SAFE` directly (`sup_state` is a
+plain `uint32_t` field the classifier already tracks but wasn't using for this
+check). They disagreed 22 to 58 times per build/vector -- never zero, across
+every single build. Both directions occurred:
+
+- **Marks claims safety, `sup_state` says otherwise** (would mask a real
+  `SAFETY_VIOLATION`): `marks=0x180` (`FAULT_ASSERTED | SAFE_ENTERED`) paired
+  with `sup_state` still `SUP_INIT` (`0x11`), or in a few cases outright
+  wild-pointer garbage -- `sup_state=0x40010004` (the `ORACLE_MARK` MMIO
+  address) and `sup_state=0x20000034` (`g_image`'s address) both appeared,
+  the same corrupted-pointer signature as bug 1's original failure.
+- **`sup_state` says safety was reached, marks disagrees** (would fabricate a
+  `SAFETY_VIOLATION` that didn't happen): `sup_state=0x88` (`SUP_SAFE`,
+  genuinely reached) paired with `marks=0x80` -- `FAULT_ASSERTED` set,
+  `SAFE_ENTERED`'s bit simply never OR'd in.
+
+Unlike bug 5, this one is symmetric: it can produce false negatives (missed
+violations, the dangerous direction for a safety classifier) and false
+positives (fabricated ones) with roughly comparable frequency, since nothing
+about `oracle_mark()`'s corruption mechanism favors one direction over the
+other -- which specific bit a stale register happens to carry is arbitrary.
+
+Fix: `entered_safe = (o.sup_state == SUP_SAFE)`, mirroring bug 5's fix
+exactly and for the identical reason -- `sup_state` is a direct store of a
+sparse constant (`0x11`/`0x22`/`0x44`/`0x88`) in every assignment in
+`safety.c`, never a load-modify-store, so it isn't exposed to a skipped-load
+corruption the way `marks` is. Both gates rerun clean. The corrected
+supervisor table is above; unlike bug 5's retraction of the `-O0` conclusion,
+this correction moves every cell but **does not reverse the qualitative
+finding** -- hardening still only marginally reduces the violation rate, and
+the `-O2` vs `-O0` ordering is unchanged. Worth stating plainly: that the
+conclusion survived this time was not knowable in advance of running the
+audit, and "the fix probably won't change the story" is exactly the kind of
+assumption bug 5 exists to discourage.
+
+**The generalisable lesson from all six, stated once: a fault injection
 harness must be adversarial about its own instrumentation, its own memory
 model, its own concurrency, and its own idea of "undefined" -- and "adversarial"
 has to be re-applied to every new telemetry field and every new fault order,
-not assumed to transfer from the last field or order it was applied to.** All
-five bugs were silent, all five produced confident wrong numbers, and two of
-them (1 and 5) pointed in the direction that would have gotten published. A
-fabricated bypass survives review far longer than a missing one.
+not assumed to transfer from the last field or order it was applied to.** Bug
+6 is the clearest demonstration of that last clause in this document: knowing
+bug 5's exact mechanism did not make bug 6 optional to check, because the
+question was never "does this codebase have the bug class" -- it was "does
+this specific field, in this specific classifier, have it," and the only way
+to answer that is to look. All six bugs were silent, all six produced
+confident wrong numbers, and three of them (1, 5, and directionally 6)
+pointed toward fabricated findings rather than suppressed ones. A fabricated
+bypass survives review far longer than a missing one.
 
 ## Threats to validity
 
@@ -556,22 +614,18 @@ fabricated bypass survives review far longer than a missing one.
    immigrants each generation against premature convergence. Validated by
    rediscovering a real order-2 `forged`/hardened-`-O2` bypass from scratch in
    9 generations. This is also the tool for the item below.
-4. **Redo the triple-fault search on `rollback`/`bad_magic`, for real this
-   time.** The order-3 exhaustive search that motivated bug 5 above is
-   withdrawn -- every one of its 132 results was the classifier artifact, not
-   a real bypass. Whether these two vectors survive three faults is an open
-   question again, not a settled one. `ga.py` can search order 3+ without the
-   millions-of-combinations cost of exhausting it, though for traces this
-   short (58/74 instructions) exhaustive order-3 is still cheap enough (a few
-   million combinations) to just rerun directly with the fixed classifier.
-5. **Audit `classify_supervisor()` for the same failure shape.** It reads
-   `marks & MARK_SAFE_ENTERED` too (`classify.py`) -- structurally the same
-   accumulator-read pattern bug 5 broke, though used in the opposite
-   direction (absence of the bit signals failure, not presence signaling
-   success), which means a coincidentally-corrupted mark here would cause a
-   false *negative* -- a missed safety violation -- rather than a false
-   positive. Not yet verified either way; flagging it rather than leaving it
-   silently unchecked is the whole point of bug 5's lesson.
+4. ~~**Redo the triple-fault search on `rollback`/`bad_magic`.**~~ — done,
+   with the fixed classifier: **both genuinely closed, exhaustively, 0/0**
+   (1,974,784 and 4,148,736 triples). The withdrawn 96/36 result was entirely
+   the bug 5 artifact; the real answer is a clean confirmation, not a
+   different vulnerability.
+5. ~~**Audit `classify_supervisor()`.**~~ — done, see RESULTS.md bug 6. It had
+   the same failure, confirmed by direct empirical audit (comparing `marks &
+   MARK_SAFE_ENTERED` against `sup_state` on every single-fault supervisor
+   run, not inferred from bug 5): 22-58 mismatches per build/vector, in both
+   directions (would-mask and would-fabricate). Fixed the same way bug 5 was
+   fixed. The supervisor table above is corrected; the qualitative conclusion
+   (hardening only marginally helps) survived, unlike bug 5's `-O0` reversal.
 6. Independent watchdog model for the supervisor, per the fail-closed argument.
 7. MicroBlaze port, to make "architecture-independent" a claim not an aspiration.
 8. QEMU backend for cross-validation; disagreement between backends localises

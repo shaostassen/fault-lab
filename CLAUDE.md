@@ -147,6 +147,23 @@ baseline table above significantly, especially `hardened -O0` (4/4/4 →
 table's original "-O0 is the worst hardened config" conclusion was itself
 downstream of this bug and had to be retracted.
 
+**11. `classify_supervisor()` had invariant 10's exact bug too — checked by
+audit, not assumed from the boot fix.** It read `marks & MARK_SAFE_ENTERED`,
+the same read-modify-write accumulator exposure. Confirmed empirically:
+across every supervisor build, single-fault sweeps of `overcurrent` and
+`deadline_miss` found 22-58 runs per build/vector where `marks &
+MARK_SAFE_ENTERED` disagreed with `sup_state == SUP_SAFE`, in **both**
+directions — `marks` claiming safety while `sup_state` was still `SUP_INIT`
+(or wild-pointer garbage, the bug-1 signature) would have masked a real
+`SAFETY_VIOLATION`; `sup_state == SUP_SAFE` with the mark bit simply unset
+would have fabricated one. Fixed the same way: `entered_safe = (sup_state ==
+SUP_SAFE)`, since `sup_state` is a direct store of a sparse constant in
+`safety.c`, same reasoning as `verdict`. Unlike invariant 10's fix, this one
+did not reverse the supervisor's qualitative conclusion (hardening still only
+marginally reduces violation rate) — but that was not knowable before running
+the audit, which is the point: bug 5's mechanism does not tell you whether
+bug 6 exists, only that it's worth checking for. See RESULTS.md bug 6.
+
 ## Architecture
 
 ```
@@ -239,7 +256,7 @@ documentation, not an assertion in the test itself).
    not a wide blind spot — see RESULTS.md and invariant 9 above.
 
    Finding this also surfaced a fourth silent harness bug (RESULTS.md,
-   "Five harness bugs" §4, and invariant 8 above): `reset()` left R0-R12/LR
+   "Six harness bugs" §4, and invariant 8 above): `reset()` left R0-R12/LR
    undefined, so `trigger=0` faults could read golden-trace leftover register
    state instead of a defined reset value. Fixed; both gates rerun clean.
 4. ~~**GA search**~~ — done, `harness/faultlab/ga.py`. Validated by
@@ -252,14 +269,16 @@ documentation, not an assertion in the test itself).
    briefly looked like the most exciting result in the whole project. See
    RESULTS.md bug 5 for the full account — it's the one worth reading if you
    only read one section of that document.
-5. **Redo the triple-fault search on `rollback`/`bad_magic`** with the fixed
-   classifier — the original result is withdrawn, not negative. Real answer
-   unknown. RESULTS.md's traces are short enough (58/74 instructions) that
-   exhaustive order-3 is cheap; `ga.py` isn't even necessary for this one.
-6. **Audit `classify_supervisor()`** for bug 5's failure shape — it reads
-   `marks & MARK_SAFE_ENTERED` too, same accumulator pattern, opposite
-   direction (a coincidentally-corrupted mark here would cause a missed
-   safety violation, not a fabricated bypass). Not yet checked either way.
+5. ~~**Redo the triple-fault search on `rollback`/`bad_magic`**~~ — done,
+   with the fixed classifier: both **genuinely, exhaustively closed against
+   three faults** (1,974,784 and 4,148,736 triples, 0/0). The withdrawn 96/36
+   result was entirely bug 5's artifact.
+6. ~~**Audit `classify_supervisor()`**~~ — done, see invariant 11 and
+   RESULTS.md bug 6. It had the same failure — confirmed by direct audit
+   (comparing `marks & MARK_SAFE_ENTERED` against `sup_state` on every
+   single-fault supervisor run), not assumed from bug 5. 22-58 mismatches per
+   build/vector, both directions (would-mask and would-fabricate). Fixed;
+   supervisor table in RESULTS.md corrected; qualitative conclusion survived.
 7. **Independent watchdog model** for the supervisor. The current result says
    fail-closed is unachievable in software — model a watchdog that drives
    gate-driver enable low on timeout and show it closes the gap.
