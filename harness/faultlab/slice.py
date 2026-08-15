@@ -153,18 +153,20 @@ def trace_deps(build_dir: str, vec, budget: int = 50_000_000) -> list[Step]:
     return [Step(pc, cond, rr, rw, mr, mw) for pc, cond, rr, rw, mr, mw in raw]
 
 
-def backward_slice(steps: list[Step], seed_mem_addrs,
-                   loop_repeat_threshold: int = 4) -> list[int]:
-    """Dynamic backward slice over an already-traced golden run.
+def backward_slice_from_seeds(steps: list[Step], live_seeds: set,
+                              loop_repeat_threshold: int = 4) -> list[int]:
+    """Dynamic backward slice over an already-traced golden run, seeded from
+    an arbitrary set of ("reg", name) / ("mem", addr) tuples.
 
     Returns instruction-count trigger indices (0-based, matching Fault.trigger)
     in ascending order: the candidate set for multi_fault_from_candidates(),
     narrowed from the full trace to instructions that can influence whichever
-    memory locations are seeded, directly (dataflow) or via a conditional
-    branch on the path to them (control flow -- see module docstring, and its
-    note on why `loop_repeat_threshold` exists)."""
+    locations are seeded, directly (dataflow) or via a conditional branch on
+    the path to them (control flow -- see module docstring, and its note on
+    why `loop_repeat_threshold` exists). backward_slice() and window_slice()
+    below are both thin wrappers that build a seed set and call this."""
     pc_counts = Counter(s.pc for s in steps)
-    live = {("mem", a) for a in seed_mem_addrs}
+    live = set(live_seeds)
     idx: list[int] = []
     for i in range(len(steps) - 1, -1, -1):
         s = steps[i]
@@ -176,6 +178,40 @@ def backward_slice(steps: list[Step], seed_mem_addrs,
             live |= {("reg", r) for r in s.reg_r} | {("mem", a) for a in s.mem_r}
     idx.reverse()
     return idx
+
+
+def backward_slice(steps: list[Step], seed_mem_addrs,
+                   loop_repeat_threshold: int = 4) -> list[int]:
+    """Dynamic backward slice seeded from a set of memory addresses (the
+    decision's own storage -- e.g. the oracle verdict). See
+    backward_slice_from_seeds() for the general form; window_slice() below
+    seeds from an instruction window's dependencies instead."""
+    seeds = {("mem", a) for a in seed_mem_addrs}
+    return backward_slice_from_seeds(steps, seeds, loop_repeat_threshold)
+
+
+def window_slice(steps: list[Step], window: tuple[int, int],
+                 loop_repeat_threshold: int = 4) -> list[int]:
+    """Dynamic backward slice seeded from what a specific ADDRESS window reads,
+    rather than from the decision's memory. Answers a narrower, different
+    question than boot_decision_slice(): not "what can influence the final
+    verdict" but "what can influence THIS check's outcome specifically."
+
+    Motivating case (see RESULTS.md, "the seeded search was wrong"): the
+    hardened -O2 double-fault campaign found every novel bypass's *late* fault
+    landing in the same narrow instruction window (8102-8115) regardless of
+    where the *early* fault was -- an early-fault range spanning nearly the
+    whole trace. Seeding a slice from the oracle verdict doesn't explain that:
+    it finds what influences acceptance in general, not what specifically
+    carries an early fault's effect forward into that one window. Seeding from
+    the window's own register/memory reads does -- whatever this returns is
+    upstream of the exact values the 8102-8115 checks consume, which is the
+    dependency an early fault has to be corrupting."""
+    seeds: set = set()
+    for s in steps:
+        if window[0] <= s.pc <= window[1]:
+            seeds |= {("reg", r) for r in s.reg_r} | {("mem", a) for a in s.mem_r}
+    return backward_slice_from_seeds(steps, seeds, loop_repeat_threshold)
 
 
 def boot_decision_slice(build_dir: str, vec, budget: int = 50_000_000,

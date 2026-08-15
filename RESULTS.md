@@ -197,31 +197,66 @@ one "early" fault and one "late" fault, and the two halves behave completely
 differently.
 
 - The **late** fault is always in a 14-instruction window, triggers 8102-8115
-  -- exactly the `cmp_a`/`cmp_b` check region identified above as the
-  structural blind spot for the single-fault survivors. This is the only place
-  in `verify_image_hardened` where the accept/reject decision actually gets
-  committed, so any bypass, single- or double-fault, has to land there.
+  -- the same `cmp_a`/`cmp_b`/`cmp_a!=cmp_b`/`memcmp_ct(d1,d2)` check block
+  identified above. This is the only place in `verify_image_hardened` where
+  the accept/reject decision actually gets committed, so any bypass has to
+  land there.
 - The **early** fault ranges across essentially the *entire* trace -- 476
-  distinct trigger values from 0 (the very first instruction executed, before
-  `main` even runs) to 8104. It doesn't need to be surgically placed near the
-  decision at all.
+  distinct trigger values from 0 to 8104.
 
-Read together: the late-window fault *alone* is not quite sufficient to force
-acceptance (that's why it didn't show up in the single-fault sweep), but it's
-close -- and almost any sufficiently early, independent disruption is enough
-to tip it over. This is a materially different, and materially larger, finding
-than "two known survivors plus an inert second fault." It says the late-window
-blind spot has more give in it than the single-fault result suggested: it's
-not two exact instruction/width pairs, it's a wide basin, and a broad range of
-otherwise-unrelated early corruption is enough to push a run into it.
+First hypothesis was that the early fault corrupts some shared register or
+memory value the late check reads. **That's wrong, and it's worth recording
+why**, because the actual mechanism is more interesting than that. A
+`window_slice()` seeded from the check block's own register/memory reads
+(`harness/faultlab/slice.py`) explains 468 of the 476 early triggers (98.3%)
+by dataflow/control-flow alone -- strong, but direct instrumentation of a
+representative pair (early trigger 3899, late trigger 8107) shows every
+register and the one stack memory address the block reads are **bit-identical**
+between "late fault alone" and "both faults" right up to the point of
+divergence. Nothing is being corrupted.
 
-Not yet done: characterizing *why* early corruption widens the late-window
-blind spot (which register or memory value is the actual dependency -- a
-proper backward slice from the 8102-8115 window specifically, rather than from
-the oracle verdict, would answer this directly) and whether the same structure
-exists in `rollback`/`bad_magic` (their exhaustive 0/0 result above rules out
-*this specific* mechanism reopening them, but doesn't explain why forged's
-decision has give and theirs apparently doesn't).
+**The real mechanism is in how SKIP faults interact with instruction-count
+triggering itself.** `UnicornBackend._apply()` moves the PC forward by a
+skipped instruction's byte width but never advances `self._instr` --
+correctly, since a skipped instruction didn't execute -- but that means a
+*second* fault's `trigger` in the same `FaultSet` is counted only against
+instructions actually executed after the first fault, not against the golden
+trace's own instruction numbering. An early skip of width `w0` shifts where a
+later nominal trigger `t1` actually lands, by exactly `w0`, to golden position
+`t1 + w0`.
+
+Computing `t1 + w0` across all 1,206 novel results confirms it: the
+distribution peaks sharply at **8105 (352 pairs) and 8106 (219 pairs) -- the
+exact two known single-fault survivors** -- with the remaining mass
+(8108-8118, ~450 pairs) landing elsewhere in the same check block, dense
+enough with redundant, agreement-only checks that several nearby
+offset/width combinations are independently skippable into acceptance, not
+just those exact two addresses.
+
+**This is not 1,206 independent vulnerabilities, and it is not a bug in
+instruction-count triggering.** It is instruction-count triggering doing
+exactly what it's specified to do -- and doing it in a way that's more
+physically realistic than "golden-trace-absolute" triggering would have been:
+a real glitch that skips an instruction genuinely advances the target faster
+in elapsed-time terms, so a second, time-triggered glitch landing later than
+planned is exactly what a real attacker's timing error would look like too.
+The finding is about the check block's tolerance for that drift: it's wide
+and uniform enough (multiple redundant, agreement-only checks in a row) that
+an attacker who mistimes a single fault by a few instructions can often
+recover the same outcome with a second, imprecise fault absorbing the error,
+rather than needing to reacquire exact timing. **The single-fault result (2
+exploitable instructions) understates how easy this class of attack is to
+mount; the double-fault result (~14 landing points, reachable through a wide
+range of timing-error-absorbing early faults) is the more operationally
+honest number.**
+
+Still open: whether `rollback`/`bad_magic`'s equivalent decision points have
+the same timing-drift tolerance. Their exhaustive 0/0 result rules out this
+mechanism reopening *them*, but that could mean their decision points are
+genuinely point-like (no nearby offset/width combination works) rather than
+merely "not reached by this search" -- worth confirming which, since it
+changes whether "closed" is a property of those checks or an artifact of
+their traces being too short for a drift effect to have room to matter.
 
 ## Safety supervisor: software hardening does not close this
 
@@ -358,19 +393,26 @@ missing one -- and the fourth bug shows that lesson holds even at a scale of
 
 ## Next
 
-1. **Characterize the early-fault mechanism.** 1,206 novel double-fault
-   bypasses share a 14-instruction late window (8102-8115) but a 476-value-wide
-   early range (0-8104). Run a backward slice seeded from the 8102-8115 window
-   itself (not from the oracle verdict) to find what memory/register value
-   actually carries the "give" from an early fault forward to the late check --
-   that's the difference between "a wide, shallow blind spot" and "476
-   independent bugs that happen to share a landing zone," and only one of
-   those is actionable to fix.
+1. ~~**Characterize the early-fault mechanism.**~~ — done, see RESULTS.md
+   ("the seeded search was wrong. There is a novel attack surface, and it's
+   large"). Not register/memory corruption (ruled out by direct
+   instrumentation, register-identical up to the point of divergence). It's
+   that `_apply()` never advances `self._instr` for a SKIP fault, so a second
+   fault's trigger is counted against actually-executed instructions, not
+   golden-trace position -- an early skip of width `w0` shifts a later nominal
+   trigger `t1`'s true landing point to `t1 + w0`. That value clusters at 8105
+   and 8106 across 571 of 1,206 novel pairs. Not a triggering bug: it's a
+   physically realistic model of timing drift after a real glitch, and the
+   finding is that the vulnerable check block tolerates that drift over a wide
+   range rather than requiring exact timing.
 2. **Explain the asymmetry with `rollback`/`bad_magic`.** Those two are
    exhaustively closed against the identical double-fault search (0/95.9M
-   scaled down). Either their equivalent decision window has no early-fault
-   dependency, or it does and the search there (58/74-instruction traces) was
-   too short to expose it -- worth confirming which.
+   scaled down). Given the drift mechanism above, the open question is
+   sharper than before: do their decision points have no nearby
+   offset/width that works (genuinely point-like), or did their much shorter
+   traces (58/74 vs 8,119 instructions) just not give a drift effect room to
+   land anywhere -- worth confirming which, since only one of those is a
+   claim about the countermeasure and the other is a claim about the test.
 3. GA search over the residual space, per the original roadmap -- now that
    `slice.py` exists to seed it and the double-fault baseline above exists to
    compare against.

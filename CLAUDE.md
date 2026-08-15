@@ -106,6 +106,25 @@ if narrow, instance of the same silent-self-corruption pattern as bugs 1-3
 above. `reset()` now zeroes R0-R12 and LR explicitly so "undefined" is a
 documented choice, not an accident of call order.
 
+**9. In a multi-fault `FaultSet`, a later trigger is relative to executed
+instructions, not golden-trace position.** `_apply()` moves the PC forward for
+a SKIP fault but never advances `self._instr` (correctly — a skipped
+instruction didn't execute). Consequence: fault *N+1*'s `trigger` is counted
+against instructions actually run since fault *N*, so an earlier skip of width
+`w` silently shifts where a later nominal trigger `t` truly lands, to golden
+position `t + w`. This is not a bug — it is arguably the physically correct
+behavior, since a real glitch that skips an instruction genuinely advances the
+target faster in elapsed-time terms, and a second, later, time-triggered
+glitch landing on `t + w` rather than `t` is exactly what a real attacker's
+timing error would produce. But it means multi-fault trigger tuples are
+**cumulative, not absolute** — do not read a `FaultSet`'s later triggers as
+positions in the unfaulted golden trace, and do not assume a wide spread of
+"early" triggers in a multi-fault result implies a wide range of independently
+vulnerable causes. See RESULTS.md's double-fault section for the case this
+produced: 476 distinct early-fault trigger values that looked at first like
+476 different bugs and turned out to be one drift effect landing on the same
+~14 addresses.
+
 ## Architecture
 
 ```
