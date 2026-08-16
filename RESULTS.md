@@ -395,6 +395,53 @@ marks `0x60` (`SUP_ARMED | SUP_RUNNING`), and both fault vectors end with
 `0x180` (`FAULT_ASSERTED | SAFE_ENTERED`) -- the same checkpoint sequence the
 Cortex-M build produces.
 
+### Multi-fault: the countermeasures break at order 3 on RV32I but not on ARM
+
+The sharpest cross-architecture result, and it needed the most care to believe,
+because the last surprising triple-fault result in this document was entirely a
+classifier artifact (bug 5).
+
+| vector | order | ARM | RV32 |
+|---|---|---|---|
+| bad_magic | 2 | 0 / 26,448 | 0 / 66,976 |
+| rollback | 2 | 0 / 43,216 | 0 / 140,448 |
+| bad_magic | 3 | **0** / 1,974,784 | **29** / 8,037,120 |
+| rollback | 3 | **0** / 4,148,736 | **14** / 24,531,584 |
+
+All exhaustive. Both architectures close these two vectors completely against
+one and two faults. **At three faults ARM stays closed and RV32I does not.**
+
+Verification, because "it passed the check that caught the last one" is not the
+same as verified: every exploitable result was verdict-checked in the campaign
+(`verdict == V_BOOT_ACCEPT`, zero non-genuine), and then every distinct trigger
+tuple was replayed independently -- fresh backend, no snapshot ladder, from
+reset -- requiring a trustworthy oracle, a genuine ACCEPT verdict, *and*
+`MARK_JUMP_TAKEN` actually set. **23/23 tuples confirmed for `bad_magic`,
+10/10 for `rollback`.** Marks on the confirmed runs are `0x11` and `0x13`,
+i.e. `BOOT_ENTER | JUMP_TAKEN` with the middle checkpoints missing: the run
+reaches `jump_to_app` having skipped the verification stages rather than
+passing them.
+
+One detail worth keeping, because it shows the fault is doing something
+structural rather than incidental: on the confirmed `rollback` triples the
+oracle reports `image_version = 1279672649`, which is `0x4C464149` --
+`IMAGE_MAGIC`. The fault has shifted what the accept path reads, so the version
+check consumes the magic field instead of the version field.
+
+This is consistent with, and sharpens, the single-fault result above:
+hardening measured ~3x weaker on RV32I against `forged`, and here the two
+vectors that are *fully* closed on both architectures at orders 1-2 come apart
+at order 3 only on RV32I. The same C-level countermeasures, compiled for a
+different ISA, buy less depth.
+
+**A reproducibility gap this exposed, now fixed.** The first replay attempt
+failed, and the harness was briefly the suspect. It was not: `Row` recorded
+`triggers` for the whole tuple but only a single scalar `value` -- fault 0's
+width. Reconstructing a triple with that one width for all three faults runs a
+*different experiment* and naturally does not reproduce. `Row` now carries a
+`values` field parallel to `triggers`, so a multi-fault result is replayable
+from stored output rather than only from the process that found it.
+
 **Threats to validity specific to this comparison, and they are real:**
 
 - **The two toolchains are different compiler versions.** ARM is

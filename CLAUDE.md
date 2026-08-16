@@ -315,10 +315,19 @@ documentation, not an assertion in the test itself).
    already knows moves baseline counts — so the quantitative gap is
    confounded, the qualitative replication is not.
 
-   **MicroBlaze** still needs the QEMU backend: Unicorn has no MicroBlaze
-   target (`UC_ARCH_*` lists ARM/ARM64/MIPS/PPC/RISCV/SPARC/X86/M68K/S390X/
-   TriCore). `qemu-system-microblaze` is installed on the server and
-   `backend/gdb_rsp.py` is written and validated against a real gdbstub.
+   The supervisor replicates too, including its *negative* result: hardening
+   moves the violation rate 31.9→26.8% (ARM) and 29.0→23.7% (RV32) at `-O2`,
+   and the watchdog closes 51.3% vs 55.6%. And multi-fault sharpens the
+   picture — `rollback`/`bad_magic` are exhaustively closed on BOTH
+   architectures at orders 1 and 2, but **at order 3 ARM stays closed (0/0)
+   while RV32 does not (29 and 14 genuine bypasses)**, every distinct trigger
+   tuple replayed from reset on a fresh backend to confirm. Same C
+   countermeasures, less depth on RV32I.
+
+   **MicroBlaze** still needs a cross-compiler that does not exist in apt —
+   `qemu-system-microblaze` is installed and `backend/qemu_backend.py` is
+   generic apart from its board table, but without a compiler there is no
+   firmware. Xilinx Vitis or a crosstool-ng build.
 9. ~~**QEMU backend**~~ — done, `harness/faultlab/backend/qemu_backend.py`,
    driving `qemu-system-arm -M mps2-an385` over `backend/gdb_rsp.py`. That
    board is a Cortex-M3 with SRAM at 0x00000000 and 0x20000000, i.e. exactly

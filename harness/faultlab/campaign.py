@@ -55,6 +55,12 @@ class Row:
                           # the watchdog-model analysis in RESULTS.md, which a
                           # SAFETY_VIOLATION outcome alone can't distinguish.
     triggers: str        # comma-joined, for multi-fault tuples
+    values: str          # comma-joined widths/masks, parallel to `triggers`.
+                         # `value` above is only fault 0's, which makes a
+                         # multi-fault Row impossible to replay from storage --
+                         # reconstructing a triple with the first fault's width
+                         # for all three silently runs a DIFFERENT experiment,
+                         # and looks like a failure to reproduce.
 
 
 # --- worker state -----------------------------------------------------------
@@ -89,6 +95,7 @@ def _run_one(fs: FaultSet) -> Row:
         instructions=res.instructions, verdict=res.oracle.verdict,
         marks=res.oracle.marks, halt_reason=int(res.halt_reason),
         triggers=",".join(str(f.trigger) for f in fs.faults),
+        values=",".join(str(f.value) for f in fs.faults),
     )
 
 
