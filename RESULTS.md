@@ -64,15 +64,31 @@ spills and reloads everything, so there are far more individually-skippable
 instructions between a decision and its consequence. Debug builds are not just
 slower, they are a materially larger attack surface.
 
-How compiler-version-sensitive are these counts, actually? Less than this
-document long assumed. Building the whole ARM matrix with GCC **14.2.1** and
-with **15.3.1** produces *identical* numbers in all eighteen cells, identical
-golden trace lengths, and an identical exploitable-set hash. The earlier note
-in this document claiming drift (24 at 13.2.1 vs 32 at 15.3.1 for base
-`-O2`/forged) predates bug 5's classifier fix and is contaminated by it: the
-post-fix figure is 22, and the "drift" was mostly the artifact moving, not the
-codegen. Compiler version may still matter across a wider version span -- this
-is two adjacent majors -- but it is not the free variable it was treated as.
+How compiler-version-sensitive are these counts, actually? It depends on how
+far apart the versions are, and the honest answer has two halves.
+
+**Adjacent majors: not sensitive.** Building the whole ARM matrix with GCC
+**14.2.1** and with **15.3.1** produces *identical* numbers in all eighteen
+cells, identical golden trace lengths, and an identical exploitable-set hash.
+That is what makes the cross-architecture comparison sound, since the RISC-V
+toolchain is 14.2.0.
+
+**A wider gap: sensitive.** CI runs on Ubuntu's packaged
+`gcc-arm-none-eabi`, a 13.x, and there the `secureboot-hardened-O2`/forged
+golden trace is **8,130 instructions rather than 8,119** -- so the two
+surviving bypasses sit at different instruction indices entirely. Nothing
+about the security conclusion changes (the regression gate's ceilings still
+hold, and the backends still agree with each other), but the specific trigger
+numbers quoted throughout this document are properties of *this* codegen, not
+of the source. That is why the cross-backend gate discovers the survivors
+rather than hardcoding 8105/8106, which is a bug CI caught the first time it
+ran.
+
+The earlier note in this document claiming drift (24 at 13.2.1 vs 32 at
+15.3.1 for base `-O2`/forged) still predates bug 5's classifier fix and is
+contaminated by it -- the post-fix figure is 22 -- so the *magnitude* of that
+old comparison was mostly the artifact moving. The direction, that 13.x
+differs from 14.x/15.x, holds up.
 
 **The hardened build does not invert this, and saying so was this project's
 biggest single mistake.** An earlier version of this document reported
