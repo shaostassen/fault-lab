@@ -50,7 +50,7 @@ import time
 
 import capstone
 
-from .gdb_rsp import GdbRsp, REG_PC, REG_SP
+from .gdb_rsp import GdbRsp, REG_PC, REG_SP, REG_LR
 from .unicorn_backend import HaltReason, RunResult
 from ..faults import FaultModel
 from ..target import (
@@ -156,6 +156,22 @@ class QemuBackend:
                          struct.pack(ORACLE_STATE_FMT, ORACLE_MAGIC, 0, 0, 0, 0, 0, 0, 0))
         for addr, data in writes:
             self.g.write_mem(addr, data)
+        # R0-R12 and LR are DEFINED zero here for the same reason invariant 8
+        # requires it of the Unicorn backend, and the requirement is sharper
+        # here: this backend reuses one QEMU process across runs, so without
+        # this loop every run would inherit the register state the *previous*
+        # faulted run happened to leave behind.
+        #
+        # Omitting it produced exactly the silent divergence invariant 8 warns
+        # about. Faults that Unicorn classifies CRASH (trigger=0, k=1 among
+        # them -- skipping Reset_Handler's first register load) instead ran to
+        # a clean REJECT under QEMU, because the registers Unicorn had zeroed
+        # still held usable values here. That is a backend bug masquerading as
+        # a cross-backend finding, which is the worst kind: it would have been
+        # written up as "QEMU disagrees" rather than "my reset was wrong".
+        for n in range(13):          # r0-r12
+            self.g.write_reg(n, 0)
+        self.g.write_reg(REG_LR, 0)
         # Cortex-M is Thumb-only: the low PC bit is the mode bit, and QEMU
         # faults immediately without it. Same reasoning as backend/isa.py.
         self.g.write_reg(REG_SP, self.target.initial_sp)

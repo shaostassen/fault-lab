@@ -336,6 +336,24 @@ documentation, not an assertion in the test itself).
    headline figure comes from contains no predicated-false instructions and
    matched QEMU exactly at 8,119; only the `genuine` control vector diverges.
 
+   Quantified over 82 runs stratified by outcome class: **100% agreement
+   (62/62) on OK, SDC, HANG and SEC_BYPASS — every class that carries a
+   security conclusion — and the entire divergence confined to CRASH** (2/20
+   agree there). One cause: **Unicorn does not model Cortex-M exception entry,
+   so `startup_cm3.c`'s `HardFault_Handler` never runs under it**, while QEMU
+   vectors into it and the firmware halts with `V_ASSERT_FAIL` as designed.
+   A second contributor is invariant 1 — Unicorn's flash is `READ|EXEC`, while
+   `mps2-an385` has writable SRAM at 0x0 (it is an FPGA board, not a part with
+   real flash), so faulted stores into code succeed there.
+
+   **Consequence worth knowing before trusting the watchdog number:** the
+   supervisor's 51.3% "a watchdog closes this" figure splits violations by
+   `halt_reason`, and CRASH is precisely the class the backends disagree on.
+   A fault that vectors into `HardFault_Handler` on silicon halts *cleanly*
+   rather than stopping the CPU, moving it into the half no watchdog closes.
+   Treat 51.3% as an upper bound until the supervisor is run through the QEMU
+   backend (cheap — those traces are ~100 instructions, not 8,119).
+
    Two limits: it is a cross-validation oracle, not a campaign engine (one RSP
    round trip per guest instruction, ~21k steps/s vs Unicorn's ~45k runs/s),
    and it is Cortex-M3 only — QEMU's RISC-V boards put DRAM at 0x80000000, so

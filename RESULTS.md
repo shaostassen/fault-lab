@@ -361,6 +361,40 @@ RV32I needs more instructions to express that same block (12,430 vs 8,119
 golden instructions at hardened `-O2`), giving a skip fault more places to
 land inside a weakness that is structural rather than architectural.
 
+### The safety oracle replicates too -- including the negative result
+
+Secure boot is the easy half to replicate: it has a crisp accept/reject
+decision. The supervisor's conclusion is a *negative* one -- software hardening
+barely moves the violation rate, and an independent watchdog closes only about
+half the gap -- and a negative result that turned out to be architecture-
+specific would be a far weaker claim than it currently reads as. It is not:
+
+| build | ARM rate | RV32 rate | ARM watchdog closes | RV32 watchdog closes |
+|---|---|---|---|---|
+| base -O2 | 31.9% | 29.0% | 60.6 / 63.2% | 60.0% |
+| hardened -O2 | 26.8% | 23.7% | 59.3 / 60.0% | 70.9% |
+| base -O0 | 24.3% | 18.1% | 40.8 / 40.5% | 47.5% |
+| hardened -O0 | 16.5% | 13.3% | 49.5 / 48.9% | 48.8% |
+| **all builds** | | | **51.3%** | **55.6%** |
+
+Both architectural claims survive, and the numbers are closer than the
+secure-boot columns were:
+
+- **Hardening helps marginally, by almost the same margin.** At `-O2` the
+  violation rate falls 31.9% -> 26.8% on ARM and 29.0% -> 23.7% on RV32 --
+  5.1 and 5.3 percentage points. The raw counts still go *up* with hardening
+  on both, for the same reason as before (the hardened trace is roughly twice
+  as long, so there are twice as many injection sites); the rate is the
+  comparable quantity.
+- **The watchdog still closes about half, on both.** 51.3% on ARM, 55.6% on
+  RV32. The half a liveness watchdog cannot touch -- a CPU that halts cleanly
+  with the wrong state -- is not an artifact of one ISA's fault behaviour.
+
+Golden-run semantics check out on the port as well: `nominal` ends with
+marks `0x60` (`SUP_ARMED | SUP_RUNNING`), and both fault vectors end with
+`0x180` (`FAULT_ASSERTED | SAFE_ENTERED`) -- the same checkpoint sequence the
+Cortex-M build produces.
+
 **Threats to validity specific to this comparison, and they are real:**
 
 - **The two toolchains are different compiler versions.** ARM is
@@ -470,6 +504,79 @@ predicated-false instructions on its path, which is why the survivor triggers
 identically above. Only `genuine`, the control vector that no exploitability
 count is derived from, is affected.
 
+### Quantified agreement: 100% everywhere except CRASH
+
+Four hand-picked runs prove the survivors reproduce; they do not give an
+agreement *rate*, and they are biased by construction toward the cases already
+known to be interesting. So: 20 runs sampled per outcome class (stratified,
+because SEC_BYPASS is ~0.006% of runs and a uniform sample of any affordable
+size would contain none of them), 82 runs total, same binary, same classifier.
+
+```
+AGREEMENT: 64/77 = 83.1%     (QEMU's own process exited on 5 further runs)
+```
+
+The headline number understates it, because the disagreements are not spread
+around -- **every single one of the 13 mismatches, and all 5 QEMU exits, came
+from runs Unicorn classifies CRASH.** Broken out by class:
+
+| Unicorn class | sampled | agree | disagree | QEMU exited |
+|---|---|---|---|---|
+| OK | 20 | 20 | 0 | 0 |
+| SDC | 20 | 20 | 0 | 0 |
+| HANG | 20 | 20 | 0 | 0 |
+| SEC_BYPASS | 2 | 2 | 0 | 0 |
+| **CRASH** | **20** | **2** | **13** | **5** |
+
+**Agreement is 62/62 = 100% on every class that carries a security
+conclusion.** The entire divergence is inside CRASH, and it has one cause.
+
+### Why CRASH is the class that diverges
+
+`startup_cm3.c` implements a real `HardFault_Handler`, wired into the vector
+table, whose body is `oracle_halt(FW_VERDICT_ASSERT_FAIL)` -- with a comment
+saying exactly why: "HardFault is a legitimate and common fault outcome --
+route it to the oracle." **QEMU models Cortex-M exception entry, so that
+handler runs. Unicorn does not model it at all: it aborts emulation and
+returns a `UcError`.** The firmware's fault handler is dead code under the
+backend every campaign in this document was run on.
+
+That single difference explains the whole CRASH column, and the QEMU-side
+outcomes name the mechanism themselves:
+
+- `qemu = CRASH / verdict 0xfff0` (6 runs) -- the fault vectored to
+  `HardFault_Handler`, which halted with `V_ASSERT_FAIL`. Both backends say
+  CRASH, but only QEMU says it the way the firmware intended.
+- `qemu = HANG` (5 runs) -- execution continued past what Unicorn treated as
+  fatal and ran out the instruction budget instead.
+- `qemu = OK / REJECT` and `qemu = SDC / REJECT` (1 each) -- the fault was
+  absorbed entirely and the image was still correctly rejected.
+- QEMU process exit (5 runs) -- fault escalation with no recoverable state,
+  where the board model gives up rather than reporting a guest-visible fault.
+
+A second, independent contributor is invariant 1: Unicorn maps flash
+`READ|EXEC`, so a faulted store into the code region raises
+`UC_ERR_WRITE_PROT`. QEMU's `mps2-an385` has *writable SRAM* at
+`0x00000000` -- it is an FPGA prototyping board, not a part with real flash --
+so the same store simply succeeds. Both models are faithful to real hardware,
+just to *different* real hardware. Unicorn's choice matches a production
+microcontroller, which is the threat model this project is about, so it stays.
+
+**What this does and does not cost the results.** Nothing in the secure-boot
+conclusions moves: SEC_BYPASS, OK, SDC and HANG agree completely, and
+`classify_boot()` maps both `CPUFAULT` and `V_ASSERT_FAIL` to CRASH anyway, so
+even the diverging runs land in the same bucket for the boot oracle. The place
+to be careful is the **supervisor watchdog split**. That analysis partitions
+`SAFETY_VIOLATION`s by `halt_reason` into "CPU stopped" (a watchdog closes it)
+versus "clean halt, wrong state" (nothing does). A fault that Unicorn reports
+as `CPUFAULT` but that real silicon would vector into `HardFault_Handler`
+would halt *cleanly* via the oracle -- moving it from the closable half to the
+unclosable one. The 51.3% figure is therefore an **upper bound** on how much a
+liveness watchdog buys, and the true figure is lower by however many of those
+CPU-stopped violations would have reached the fault handler on a real part.
+Measuring that needs the supervisor run through the QEMU backend, which is
+tractable (the traces are ~100 instructions) and is now the top open item.
+
 Two limits worth stating. This is a cross-validation oracle, not a second
 campaign engine: RSP allows one round trip per guest instruction (~21,000
 steps/s measured, against Unicorn's ~45,000 *runs* per second), so it checks
@@ -541,7 +648,11 @@ non-responsiveness)?
 | hardened -O0 | deadline_miss | 190 | 93 | 97 | 48.9% |
 | **total** | | **1,006** | **516** | **490** | **51.3%** |
 
-**An independent watchdog closes about half the gap, not all of it.** The
+**An independent watchdog closes about half the gap, not all of it.** (Read
+51.3% as an *upper bound*: the QEMU cross-validation below found that Unicorn
+does not model Cortex-M exception entry, so some of these CPU-stopped
+violations would instead vector into `HardFault_Handler` on real silicon and
+halt cleanly -- moving them into the half a watchdog cannot close.) The
 other half -- 490 of 1,006 across this matrix -- is a CPU that never stops:
 it halts cleanly via `oracle_halt()`, on schedule, with a fault having
 corrupted *which* state it reports rather than whether it keeps running. No
@@ -888,7 +999,15 @@ bypass survives review far longer than a missing one.
    MicroBlaze cross-compiler available: Ubuntu does not package one, so it
    needs Xilinx Vitis or a crosstool-ng build from source. Without a compiler
    there is no firmware to run.
-11. **Extend QEMU cross-validation to the faulted matrix.** Currently four
-   chosen runs. Sampling ~100 across outcome classes would turn "the
-   survivors reproduce" into a quantified agreement rate, which is a stronger
-   correctness argument for the harness than a spot check.
+11. ~~**Extend QEMU cross-validation to the faulted matrix**~~ -- done, 82
+   runs stratified across outcome classes: **100% agreement (62/62) on every
+   class except CRASH**, and the entire CRASH divergence traced to Unicorn not
+   modelling Cortex-M exception entry (the firmware's `HardFault_Handler` is
+   dead code under it). See "Quantified agreement" above.
+12. **Run the supervisor through the QEMU backend.** The watchdog split
+   (51.3% closable) partitions violations by `halt_reason`, and CRASH is
+   exactly the class the two backends disagree on -- a fault that vectors into
+   `HardFault_Handler` on silicon halts cleanly rather than stopping the CPU,
+   which moves it to the half a watchdog cannot close. 51.3% is currently an
+   upper bound. The supervisor traces are ~100 instructions, so this is cheap
+   over RSP, unlike the 8,119-instruction boot traces.
