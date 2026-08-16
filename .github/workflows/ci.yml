@@ -10,16 +10,48 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install ARM toolchain
-        run: sudo apt-get update && sudo apt-get install -y gcc-arm-none-eabi
+
+      # Three toolchains, because the project now makes three claims that need
+      # them: Cortex-M3 (the baseline results), RV32I (the cross-architecture
+      # replication), and QEMU (the cross-backend correctness argument).
+      # No libc package is needed for either target -- the firmware ships its
+      # own freestanding common/string.h.
+      - name: Install toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-arm-none-eabi \
+            gcc-riscv64-unknown-elf \
+            qemu-system-arm
+
       - name: Install python deps
         run: pip install -r requirements.txt
-      - name: Build firmware matrix
+
+      - name: Build firmware matrix (Cortex-M3)
         run: make build
+
+      - name: Build firmware matrix (RV32I)
+        run: make build-rv32
+
       # The determinism gate is the real test. It catches the entire class of
       # bug this harness is prone to: cross-run state leakage, fork-inherited
       # emulator state, anything that makes results depend on execution order.
       - name: Determinism gate
         run: make check
-      - name: Security regression gate
+
+      - name: Security regression gate (Cortex-M3)
         run: cd harness && python3 tests/test_regression.py
+
+      # Added when RV32I landed. Without it the second architecture -- and the
+      # claim that the same countermeasures behave differently on it -- had no
+      # regression protection at all.
+      - name: Security regression gate (RV32I)
+        run: cd harness && python3 tests/test_rv32_regression.py
+
+      # Asserts the narrow thing that must stay true across backends: the
+      # golden run agrees exactly on `forged`, and both hardened -O2 survivors
+      # still reproduce under a full machine model. It deliberately does not
+      # forbid all disagreement -- the backends are known to differ on
+      # Cortex-M exception entry, which is a documented finding, not a bug.
+      - name: Cross-backend validation gate (Unicorn vs QEMU)
+        run: cd harness && python3 tests/test_qemu_crossval.py

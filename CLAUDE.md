@@ -37,6 +37,9 @@ python3 -m faultlab.cli sweep --build ../firmware/build/secureboot-base-O2 --vec
 # THE GATE — run after any change to campaign.py, the backend, or classify.py
 python3 harness/tests/test_determinism.py
 
+# every gate CI runs: both ISAs + cross-backend agreement
+make check-all
+
 # regenerate the interactive heatmap
 python3 analysis/heatmap.py
 ```
