@@ -383,6 +383,101 @@ land inside a weakness that is structural rather than architectural.
   how the Cortex-M build behaves under Unicorn in practice, but it is a
   difference from silicon on both targets, not a property of either ISA.
 
+## QEMU cross-validation: the survivors are real, and the backends count differently
+
+Unicorn is a CPU emulator; QEMU with a board model is a machine emulator.
+Running the identical binary through both is a correctness argument for the
+harness, and any disagreement localises where the emulator abstraction
+changes the security conclusion. That was the stated purpose of a second
+backend from the beginning; this is the result.
+
+The comparison is genuinely same-binary. QEMU's `mps2-an385` is a Cortex-M3
+board with SRAM at `0x00000000` and `0x20000000` -- the map `link_cm3.ld`
+already targets, since it was written to Cortex-M convention. So the exact
+`fw.elf` the campaigns run boots under QEMU with no relink, and no
+disagreement has to be argued away as a link-address artifact first.
+
+Two empirical facts had to be established before any of this was possible,
+both checked rather than assumed: the image loads at the addresses the ELF
+declares, and the oracle MMIO store at `0x40010000` -- which Unicorn services
+with a hook and `mps2-an385` has no device for -- is **absorbed without
+raising a BusFault**, so the firmware still reaches `oracle_halt()`'s
+trailing `for(;;)`. Halt is therefore detected by the PC ceasing to advance,
+and the verdict read from `g_oracle` in RAM, which `oracle_halt()` writes
+*before* the MMIO store. The RAM copy was always the real signal on both
+backends; the MMIO write is only ever a stop trigger.
+
+### The headline finding survives a full machine model
+
+| fault | Unicorn | QEMU | agree |
+|---|---|---|---|
+| `skip@8105, k=4` | SEC_BYPASS / ACCEPT | SEC_BYPASS / ACCEPT | yes |
+| `skip@8106, k=4` | SEC_BYPASS / ACCEPT | SEC_BYPASS / ACCEPT | yes |
+| `skip@8104, k=4` | OK / REJECT | OK / REJECT | yes |
+| `skip@8105, k=1` | OK / REJECT | OK / REJECT | yes |
+
+**Both hardened `-O2` survivors reproduce exactly under QEMU**, verdict and
+classification identical, using the same `classify_boot()` on both. The
+project's central security result is not an artifact of the CPU emulator. The
+two adjacent negative controls also agree, so the agreement is not vacuous --
+the backends distinguish the same faults from each other, not merely agree
+that something happened.
+
+Unfaulted golden runs agree on verdict and marks for all four vectors, and on
+instruction count for three of them:
+
+| vector | Unicorn | QEMU | verdict | marks |
+|---|---|---|---|---|
+| forged | 8,119 | 8,119 | REJECT / REJECT | 0x07 / 0x07 |
+| rollback | 74 | 74 | REJECT / REJECT | 0x03 / 0x03 |
+| bad_magic | 58 | 58 | REJECT / REJECT | 0x01 / 0x01 |
+| genuine | 8,390 | **8,391** | ACCEPT / ACCEPT | 0x1f / 0x1f |
+
+### The disagreement, and why it is a finding rather than a bug
+
+`genuine` is one instruction longer under QEMU. Diffing the two PC sequences
+puts the divergence at index 8,352, and the disassembly names the cause
+immediately:
+
+```
+5da: bf18        it   ne              ; Thumb-2 IT block
+5dc: f04f 30ff   movne.w r0, #-1      ; predicated instruction
+5e0: f080 30a5   eor.w  r0, r0, #0xa5a5a5a5
+```
+
+This is C5's re-verification of `hdr->magic`. On the `genuine` vector the
+magic matches, so `subs` produces zero, `NE` is false, and the `movne` has no
+architectural effect. **QEMU counts it as an executed instruction; Unicorn
+omits it from the trace entirely.** QEMU is the faithful one here: on real ARM
+a predicated-false instruction is still fetched and retired, it simply writes
+nothing. Unicorn's TCG never fires the code hook for it.
+
+Why this matters, given that faults trigger on instruction count (invariant 6
+in CLAUDE.md): a trigger index is a coordinate in whichever emulator produced
+it. Unicorn's coordinates are internally consistent -- every campaign in this
+document is Unicorn-driven, so trigger *N* always means the same program point
+across every run compared against another -- but they are **not** the same
+coordinates a real CPU (or QEMU) would use. An attacker timing a glitch to
+"instruction N" on silicon would land later than Unicorn's index N by the
+number of predicated-false instructions executed before that point.
+
+The practical impact on this project's results is nil, and that is measured
+rather than hoped: the divergence only appears on paths that reach a
+predicated-false instruction, and `forged` -- the vector every headline
+number is computed on -- matched Unicorn **exactly** at 8,119. There are no
+predicated-false instructions on its path, which is why the survivor triggers
+8105/8106 mean the same thing in both backends, and why they reproduce
+identically above. Only `genuine`, the control vector that no exploitability
+count is derived from, is affected.
+
+Two limits worth stating. This is a cross-validation oracle, not a second
+campaign engine: RSP allows one round trip per guest instruction (~21,000
+steps/s measured, against Unicorn's ~45,000 *runs* per second), so it checks
+tens of chosen runs, never a matrix. And it covers Cortex-M3 only -- QEMU's
+RISC-V boards (`virt`, `spike`) place DRAM at `0x80000000`, so cross-validating
+the RV32 target would require relinking, at which point the two backends stop
+running the same bytes and the argument weakens considerably.
+
 ## Safety supervisor: software hardening does not close this
 
 | build | overcurrent | deadline_miss | runs | golden | rate |
@@ -713,6 +808,13 @@ bypass survives review far longer than a missing one.
   one compare-and-branch, but it is a substitution and named as one.
 - Simulated campaigns establish **necessary** conditions for exploitability, not
   sufficient ones. Hardware validation is the follow-up, not an optional extra.
+- **Instruction counts are emulator-relative.** Unicorn does not count
+  predicated-false Thumb-2 instructions as executed; QEMU does, and QEMU
+  matches silicon. Trigger indices in this document are Unicorn coordinates.
+  They are self-consistent, and measured to be identical to QEMU's on the
+  `forged` path every headline number comes from -- but they are not a
+  wall-clock or retired-instruction count on a real part. See the QEMU
+  cross-validation section.
 
 ## Next
 
@@ -774,8 +876,19 @@ bypass survives review far longer than a missing one.
    baseline counts move with compiler version -- so the *quantitative* part of
    the cross-architecture gap is confounded until both targets are built with
    the same GCC major version.
-9. **MicroBlaze port**, which does need the QEMU backend: Unicorn has no
-   MicroBlaze target at all. `qemu-system-microblaze` is installed on the
-   server; the GDB RSP client (`backend/gdb_rsp.py`) is written and validated.
-10. QEMU backend for cross-validation; disagreement between backends localises
-   where the abstraction gap changes the security conclusion.
+9. ~~**QEMU backend for cross-validation**~~ -- done, see "QEMU
+   cross-validation" above. Same binary through both backends on
+   `mps2-an385`; both `-O2` survivors reproduce; found one genuine
+   disagreement (predicated-false instruction counting) that is a property of
+   Unicorn rather than of this harness, and does not affect any reported
+   number.
+10. **MicroBlaze port** -- still blocked, and not on the QEMU backend any
+   more. `qemu-system-microblaze` is installed and `backend/qemu_backend.py`
+   is architecture-generic apart from its board table, but there is no
+   MicroBlaze cross-compiler available: Ubuntu does not package one, so it
+   needs Xilinx Vitis or a crosstool-ng build from source. Without a compiler
+   there is no firmware to run.
+11. **Extend QEMU cross-validation to the faulted matrix.** Currently four
+   chosen runs. Sampling ~100 across outcome classes would turn "the
+   survivors reproduce" into a quantified agreement rate, which is a stronger
+   correctness argument for the harness than a spot check.

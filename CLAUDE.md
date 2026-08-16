@@ -319,10 +319,27 @@ documentation, not an assertion in the test itself).
    target (`UC_ARCH_*` lists ARM/ARM64/MIPS/PPC/RISCV/SPARC/X86/M68K/S390X/
    TriCore). `qemu-system-microblaze` is installed on the server and
    `backend/gdb_rsp.py` is written and validated against a real gdbstub.
-9. **QEMU backend** for cross-validation. Agreement is a correctness argument;
-   disagreement localises where the emulator abstraction changes the security
-   conclusion, which is itself a finding. Also the actual prerequisite for
-   item 8.
+9. ~~**QEMU backend**~~ — done, `harness/faultlab/backend/qemu_backend.py`,
+   driving `qemu-system-arm -M mps2-an385` over `backend/gdb_rsp.py`. That
+   board is a Cortex-M3 with SRAM at 0x00000000 and 0x20000000, i.e. exactly
+   `link_cm3.ld`'s map, so it runs the **identical** `fw.elf` with no relink —
+   which is what makes a disagreement a finding rather than a link-address
+   artifact. Both `-O2` survivors reproduce under it (SEC_BYPASS/ACCEPT on
+   both backends), so the headline security result is not a Unicorn artifact.
+
+   It found one real disagreement, documented in RESULTS.md: **Unicorn does
+   not count predicated-false Thumb-2 IT-block instructions as executed, and
+   QEMU does** (QEMU matches silicon here). Since faults trigger on
+   instruction count, trigger indices are Unicorn coordinates — self-consistent
+   across this project, but not identical to a real part's retired-instruction
+   count. Measured impact on reported numbers: none. The `forged` path every
+   headline figure comes from contains no predicated-false instructions and
+   matched QEMU exactly at 8,119; only the `genuine` control vector diverges.
+
+   Two limits: it is a cross-validation oracle, not a campaign engine (one RSP
+   round trip per guest instruction, ~21k steps/s vs Unicorn's ~45k runs/s),
+   and it is Cortex-M3 only — QEMU's RISC-V boards put DRAM at 0x80000000, so
+   RV32 would need relinking and would no longer be the same bytes.
 
 ## Conventions
 
