@@ -210,13 +210,13 @@ writes inputs there pre-reset. No rebuild per vector.
 
 ## Regression baselines
 
-Known-good as of the last full run: `arm-none-eabi-gcc` 15.3.1, with the
-invariant-10 classifier fix applied. **Both of those are load-bearing on these
-exact numbers** — a different compiler version moves the `base` column (see
-RESULTS.md's "Compiler sweep"), and invariant 10's fix moved literally every
-cell except `hardened -O2`/forged when it landed (`hardened -O0` in
-particular: 4/4/4 → 0/0/0). If a change moves these and you didn't just
-change compiler or fix a classifier bug, understand why before committing.
+Known-good with the invariant-10 classifier fix applied, and **verified
+identical under `arm-none-eabi-gcc` 14.2.1 and 15.3.1** — same counts, same
+golden lengths, same exploitable-set hash (`0xd584f5`), so these are not
+specific to one toolchain. The classifier fix *is* load-bearing: invariant
+10 moved literally every cell except `hardened -O2`/forged when it landed
+(`hardened -O0` in particular: 4/4/4 → 0/0/0). If a change moves these and
+you did not just fix a classifier bug, understand why before committing.
 Secure boot, single-fault skip k in {1,2,3,4}, exhaustive:
 
 | build | forged | rollback | bad_magic |
@@ -310,10 +310,10 @@ documentation, not an assertion in the test itself).
    firmware Makefile plus `backend/isa.py` descriptors carry it. Qualitative
    claim replicates (hardened `-O0` is 0/0/0 on both; rollback and bad_magic
    closed at every `-O` level on both); hardening is 3x weaker on RV32I
-   against `forged` (23→7 vs 22→2 at `-O2`). Caveat that matters: the two
-   toolchains are different GCC majors (15.3.1 vs 14.2.0), which this project
-   already knows moves baseline counts — so the quantitative gap is
-   confounded, the qualitative replication is not.
+   against `forged` (23→7 vs 22→2 at `-O2`). The compiler caveat that used to
+   sit here is **resolved**: the ARM matrix rebuilt with GCC 14.2.1 (matching
+   RISC-V's 14.2.0) gives byte-for-byte the same results as 15.3.1, so the
+   comparison is same-generation and the gap is not toolchain vintage.
 
    The supervisor replicates too, including its *negative* result: hardening
    moves the violation rate 31.9→26.8% (ARM) and 29.0→23.7% (RV32) at `-O2`,

@@ -10,9 +10,9 @@ fault set, worker counts 1/2/4/8, identical exploitable sets required.
 
 Target: Cortex-M3, `arm-none-eabi-gcc` 15.3.1 (Arm GNU Toolchain 15.3.Rel1),
 Unicorn 2.1.4. Fault model: instruction skip, k in {1,2,3,4}, exhaustive over
-the full golden trace. (Earlier measurements in this project's history used
-13.2.1; the baseline vulnerable-build numbers drift with compiler version --
-see "Compiler sweep" -- the hardened numbers do not.)
+the full golden trace. Verified identical under `arm-none-eabi-gcc` 14.2.1 and
+15.3.1 -- same counts, same golden lengths, same exploitable-set hash -- so
+these numbers are not specific to one toolchain build.
 
 ## Secure boot: hardening works, and the call site was the whole story
 
@@ -62,10 +62,17 @@ barely helped" (3 vs 4). Localisation is what turned it into an actionable fix.
 Baseline, forged vector: **62 bypasses at -O0 vs 22 at -O2**. Unoptimised code
 spills and reloads everything, so there are far more individually-skippable
 instructions between a decision and its consequence. Debug builds are not just
-slower, they are a materially larger attack surface. (These specific counts
-are compiler-version-sensitive -- see the note at the top of this document --
-but the *shape* of the result, -O0 substantially worse than -O2/-Os for the
-unhardened build, is not.)
+slower, they are a materially larger attack surface.
+
+How compiler-version-sensitive are these counts, actually? Less than this
+document long assumed. Building the whole ARM matrix with GCC **14.2.1** and
+with **15.3.1** produces *identical* numbers in all eighteen cells, identical
+golden trace lengths, and an identical exploitable-set hash. The earlier note
+in this document claiming drift (24 at 13.2.1 vs 32 at 15.3.1 for base
+`-O2`/forged) predates bug 5's classifier fix and is contaminated by it: the
+post-fix figure is 22, and the "drift" was mostly the artifact moving, not the
+codegen. Compiler version may still matter across a wider version span -- this
+is two adjacent majors -- but it is not the free variable it was treated as.
 
 **The hardened build does not invert this, and saying so was this project's
 biggest single mistake.** An earlier version of this document reported
@@ -444,16 +451,19 @@ from stored output rather than only from the process that found it.
 
 **Threats to validity specific to this comparison, and they are real:**
 
-- **The two toolchains are different compiler versions.** ARM is
-  `arm-none-eabi-gcc` 15.3.1; RISC-V is `riscv64-unknown-elf-gcc` 14.2.0
-  (Ubuntu's packaged bare-metal cross-compiler). This document already
-  establishes that baseline counts move with compiler version -- that is what
-  the "Compiler sweep" section is about -- so some unknown part of the gap
-  between these columns is compiler generation, not ISA. Closing this needs
-  the same GCC major version on both targets before the quantitative claim
-  should be leaned on. The *qualitative* replication (0/0/0 hardened `-O0`,
-  rollback and bad_magic closed everywhere) is robust to this, since it does
-  not depend on the exact counts.
+- ~~**The two toolchains are different compiler versions.**~~ **Resolved by
+  measurement.** The ARM column was originally built with
+  `arm-none-eabi-gcc` 15.3.1 against RISC-V's 14.2.0, which left the
+  quantitative gap confounded by toolchain vintage. The ARM matrix has since
+  been rebuilt with `arm-none-eabi-gcc` **14.2.1** -- the same GCC generation
+  as the RISC-V compiler -- and **every cell is identical**: 62/23/16, 0/0/0,
+  22/9/6, 2/0/0, 24/8/4, 2/0/0, with all six golden trace lengths unchanged
+  and the determinism gate returning the same exploitable-set hash
+  (`0xd584f5`), meaning not merely the same counts but the same exact set of
+  vulnerable sites. The ARM/RV32 comparison is therefore same-generation
+  (14.2.1 vs 14.2.0) and the ~3x hardening gap cannot be attributed to
+  compiler vintage. Narrow reading only: this shows insensitivity *between
+  these two versions for this firmware*, not that codegen never matters.
 - **RV32I versus Thumb-2 is not a like-for-like ISA comparison.** Different
   code density (RV32I has no compressed instructions here, by choice -- see
   the Makefile), 32 architectural registers versus 16, different calling
@@ -1029,11 +1039,11 @@ bypass survives review far longer than a missing one.
    above. Delivered on Unicorn rather than QEMU (Unicorn has RISC-V; only
    MicroBlaze actually requires the QEMU backend). Qualitative claim
    replicates; hardening measured 3x weaker on RV32I against `forged`.
-8. **Match the compiler generation across architectures.** The RV32 column was
-   built with GCC 14.2.0 against ARM's 15.3.1, and this document already shows
-   baseline counts move with compiler version -- so the *quantitative* part of
-   the cross-architecture gap is confounded until both targets are built with
-   the same GCC major version.
+8. ~~**Match the compiler generation across architectures**~~ -- done. ARM
+   rebuilt with GCC 14.2.1 against RISC-V's 14.2.0: every cell, every golden
+   length and the exploitable-set hash are unchanged from the 15.3.1 build, so
+   the cross-architecture comparison is same-generation and the ~3x gap is not
+   toolchain vintage.
 9. ~~**QEMU backend for cross-validation**~~ -- done, see "QEMU
    cross-validation" above. Same binary through both backends on
    `mps2-an385`; both `-O2` survivors reproduce; found one genuine
