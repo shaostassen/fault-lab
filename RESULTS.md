@@ -316,6 +316,59 @@ against.** Against a real constant, it holds under both single- and
 double-fault search. Against a second, correctly-computed but
 un-independently-validated value, it doesn't.
 
+### Correcting the watchdog number: 51.3% -> 42.2%
+
+The split above partitions violations by `halt_reason`: CPU-stopped
+(`CPUFAULT`/`BUDGET`) counted as closable by a liveness watchdog, clean
+`ORACLE` halt counted as not. That criterion is wrong, in both directions,
+and fixing it needed the QEMU backend.
+
+**Why the criterion is wrong.** `oracle_halt()` ends in `for(;;)`. So a CPU
+fault on real silicon vectors into `HardFault_Handler`, halts via the oracle
+with `V_ASSERT_FAIL`, and then spins forever -- the CPU stops servicing
+anything, a watchdog fires, and the gate driver goes low. That is *closed*,
+even though it is a "clean halt". Meanwhile what a watchdog genuinely cannot
+close is the firmware still running its control loop while confidently
+wrong: it keeps kicking the watchdog and reports a state that does not match
+reality.
+
+So the question is not "did the CPU stop" but "did it stop servicing the
+watchdog", which gives three outcomes rather than two:
+
+| outcome | count | watchdog? |
+|---|---|---|
+| hang -- never halts at all | 301 | closes |
+| fault handler runs, then spins (`V_ASSERT_FAIL`) | 122 | closes |
+| fault escalates until the board model gives up | 2 | closes |
+| **alive and wrong -- control loop still running, state violated** | **581** | **cannot close** |
+
+**Watchdog-closable: 425 / 1,006 = 42.2%.** The published 51.3% was an
+overestimate: it credited the watchdog with runs where the firmware halts
+cleanly, on schedule, having merely computed the wrong answer.
+
+**Why this needed QEMU.** Unicorn cannot model the middle row at all. It has
+no Cortex-M exception entry, so a fault that would reach
+`HardFault_Handler` is reported as a stopped CPU and never runs the handler.
+Replaying all 516 Unicorn-stopped violations under QEMU is what separates
+them: 213 turn out to halt via the oracle, and their verdict says which kind
+of halt it was.
+
+**One difference that could have mattered, and does not.** At `-O0` every
+CPU-stopped violation is a store into the code region (`UC_ERR_WRITE_PROT`
+-- 43 of 51 and 75 of 93 on the sampled vectors). Unicorn maps flash
+`READ|EXEC` and faults; QEMU's `mps2-an385` has writable SRAM there and
+absorbs the store, so the run continues and hangs instead. Different
+mechanism, same answer: a production part with real flash would BusFault
+into the handler and spin, which is also closable. The emulators disagree
+about *how* those runs end, not about whether a watchdog catches them.
+
+The engineering conclusion is unchanged in direction and sharper in
+magnitude: **an independent liveness watchdog is necessary and closes well
+under half of the safety gap.** The remaining 57.8% is a CPU that never
+stops answering -- it needs a mitigation that does not depend on liveness at
+all, such as a hardware trip on the gate-driver output that watches current
+directly rather than trusting a software state variable.
+
 ## Second architecture: RV32I, and hardening is 3x weaker on it
 
 "Architecture-independent" was an aspiration in this document for a long time.
@@ -396,6 +449,13 @@ secure-boot columns were:
 - **The watchdog still closes about half, on both.** 51.3% on ARM, 55.6% on
   RV32. The half a liveness watchdog cannot touch -- a CPU that halts cleanly
   with the wrong state -- is not an artifact of one ISA's fault behaviour.
+  Both columns use the original `halt_reason` partition, which "Correcting
+  the watchdog number" shows is wrong in absolute terms (ARM's corrected
+  figure is 42.2%). They are kept on the same criterion here **because the
+  correction cannot currently be applied to RV32**: it needs the QEMU
+  backend, and QEMU has no RISC-V board whose memory map matches this
+  firmware. Same criterion both sides makes the comparison valid; it does not
+  make either number the corrected one.
 
 Golden-run semantics check out on the port as well: `nominal` ends with
 marks `0x60` (`SUP_ARMED | SUP_RUNNING`), and both fault vectors end with
@@ -627,12 +687,11 @@ to be careful is the **supervisor watchdog split**. That analysis partitions
 `SAFETY_VIOLATION`s by `halt_reason` into "CPU stopped" (a watchdog closes it)
 versus "clean halt, wrong state" (nothing does). A fault that Unicorn reports
 as `CPUFAULT` but that real silicon would vector into `HardFault_Handler`
-would halt *cleanly* via the oracle -- moving it from the closable half to the
-unclosable one. The 51.3% figure is therefore an **upper bound** on how much a
-liveness watchdog buys, and the true figure is lower by however many of those
-CPU-stopped violations would have reached the fault handler on a real part.
-Measuring that needs the supervisor run through the QEMU backend, which is
-tractable (the traces are ~100 instructions) and is now the top open item.
+runs the handler on a machine that models exception entry. That has since
+been measured by replaying every CPU-stopped violation through this backend
+-- and it moved the number, though not in the direction this paragraph
+originally guessed. See "Correcting the watchdog number": **42.2%**, not
+51.3%, and the criterion itself turned out to be wrong in both directions.
 
 Two limits worth stating. This is a cross-validation oracle, not a second
 campaign engine: RSP allows one round trip per guest instruction (~21,000
@@ -705,11 +764,11 @@ non-responsiveness)?
 | hardened -O0 | deadline_miss | 190 | 93 | 97 | 48.9% |
 | **total** | | **1,006** | **516** | **490** | **51.3%** |
 
-**An independent watchdog closes about half the gap, not all of it.** (Read
-51.3% as an *upper bound*: the QEMU cross-validation below found that Unicorn
-does not model Cortex-M exception entry, so some of these CPU-stopped
-violations would instead vector into `HardFault_Handler` on real silicon and
-halt cleanly -- moving them into the half a watchdog cannot close.) The
+**An independent watchdog closes about half the gap, not all of it.**
+(The 51.3% in this table is superseded -- measuring it properly required the
+QEMU backend, and the corrected figure is **42.2%**. See "Correcting the
+watchdog number" immediately below; the table is left as measured so the
+correction is auditable.) The
 other half -- 490 of 1,006 across this matrix -- is a CPU that never stops:
 it halts cleanly via `oracle_halt()`, on schedule, with a fault having
 corrupted *which* state it reports rather than whether it keeps running. No
@@ -1028,13 +1087,13 @@ bypass survives review far longer than a missing one.
    about half the gap" above. Split existing `SAFETY_VIOLATION` results by
    `halt_reason` rather than simulating one specific timeout (a liveness
    watchdog catches CPU-stopped at *any* reasonable timeout, so the split is
-   timeout-independent): **51.3% of violations are a CPU that stopped
-   responding** (a watchdog closes these by definition) **and 48.7% are a CPU
-   that completed a clean halt with the wrong state** (no watchdog timeout
-   catches this, ever -- there's no non-responsiveness to time out on).
-   Watchdog is necessary, not sufficient; the remaining half needs a mitigation
-   that doesn't depend on CPU liveness, e.g. a hardware trip on the actual
-   gate-driver output.
+   timeout-independent). That first pass gave 51.3%, which is **superseded**:
+   the partition it used (`halt_reason` alone) is wrong in both directions,
+   because `oracle_halt()` ends in `for(;;)` so a fault handler also stops the
+   CPU answering. Corrected to **42.2%** once the supervisor was replayed
+   through the QEMU backend -- see "Correcting the watchdog number". Watchdog
+   is necessary, not sufficient; the remaining 57.8% is firmware that never
+   stops responding and needs a mitigation independent of CPU liveness.
 7. ~~**Second architecture**~~ -- done, see "Second architecture: RV32I"
    above. Delivered on Unicorn rather than QEMU (Unicorn has RISC-V; only
    MicroBlaze actually requires the QEMU backend). Qualitative claim
@@ -1061,10 +1120,8 @@ bypass survives review far longer than a missing one.
    class except CRASH**, and the entire CRASH divergence traced to Unicorn not
    modelling Cortex-M exception entry (the firmware's `HardFault_Handler` is
    dead code under it). See "Quantified agreement" above.
-12. **Run the supervisor through the QEMU backend.** The watchdog split
-   (51.3% closable) partitions violations by `halt_reason`, and CRASH is
-   exactly the class the two backends disagree on -- a fault that vectors into
-   `HardFault_Handler` on silicon halts cleanly rather than stopping the CPU,
-   which moves it to the half a watchdog cannot close. 51.3% is currently an
-   upper bound. The supervisor traces are ~100 instructions, so this is cheap
-   over RSP, unlike the 8,119-instruction boot traces.
+12. ~~**Run the supervisor through the QEMU backend**~~ -- done, see
+   "Correcting the watchdog number". The published 51.3% was measured with a
+   criterion that is wrong in both directions; the corrected figure is
+   **42.2%**, and getting it required QEMU because Unicorn cannot model the
+   fault-handler path at all.

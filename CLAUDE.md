@@ -294,16 +294,19 @@ documentation, not an assertion in the test itself).
    single-fault supervisor run), not assumed from bug 5. 22-58 mismatches per
    build/vector, both directions (would-mask and would-fabricate). Fixed;
    supervisor table in RESULTS.md corrected; qualitative conclusion survived.
-7. ~~**Independent watchdog model**~~ — done, see RESULTS.md ("Watchdog
-   model: closes about half the gap"). Split `SAFETY_VIOLATION` results by
-   `halt_reason` instead of simulating one arbitrary timeout — a liveness
-   watchdog catches "CPU stopped" at any reasonable timeout, so the split
-   itself is the timeout-independent version of the claim. Result: 51.3%
-   of violations are the CPU actually stopping (`CPUFAULT`/`BUDGET` — a
-   watchdog closes these by definition), 48.7% are a clean halt with wrong
-   state (`ORACLE` — no watchdog timeout ever catches this). Necessary, not
-   sufficient: the fail-closed argument holds, but "add a watchdog" alone
-   only gets you half of "closes the gap."
+7. ~~**Independent watchdog model**~~ — done, and then **corrected**; see
+   RESULTS.md ("Correcting the watchdog number"). The first pass split
+   `SAFETY_VIOLATION`s by `halt_reason` — CPU-stopped counted as closable,
+   clean halt as not — and got 51.3%. **That criterion is wrong in both
+   directions**, because `oracle_halt()` ends in `for(;;)`: a fault handler
+   also stops the CPU answering a watchdog, so a "clean halt" with verdict
+   `V_ASSERT_FAIL` *is* closable, while firmware still running its control
+   loop with violated state is not. Corrected figure: **42.2%** (425/1,006).
+   Getting it required the QEMU backend — Unicorn has no exception entry, so
+   it cannot run the handler path at all and reports those runs as stopped.
+   Necessary, not sufficient: 57.8% is firmware that never stops responding,
+   which needs a mitigation independent of CPU liveness (e.g. a hardware trip
+   watching gate-driver current, not a software state variable).
 8. ~~**Second architecture**~~ — done for RV32I, see RESULTS.md ("Second
    architecture: RV32I, and hardening is 3x weaker on it"). Unicorn has a
    RISC-V target, so this did NOT need the QEMU backend; `ISA=rv32` in the
